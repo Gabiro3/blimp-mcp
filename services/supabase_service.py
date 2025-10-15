@@ -342,3 +342,35 @@ class SupabaseService:
         except Exception as e:
             logger.error(f"Error fetching app credentials: {str(e)}")
             return None
+    
+    async def get_workflow_webhook_url(
+        self,
+        workflow_id: str
+    ) -> Optional[str]:
+        """
+        Get webhook URL for a workflow template by its ID
+        
+        Args:
+            workflow_id: Workflow template identifier
+            
+        Returns:
+            Webhook URL string or None if not found
+        """
+        try:
+            if not self.client:
+                logger.error("Supabase client not initialized")
+                return None
+            
+            response = self.client.table("workflow_templates").select("webhook_url").eq("id", workflow_id).eq("is_active", True).single().execute()
+            
+            if response.data and response.data.get("webhook_url"):
+                webhook_url = response.data["webhook_url"]
+                logger.info(f"Retrieved webhook URL for workflow {workflow_id}")
+                return webhook_url
+            
+            logger.warning(f"No webhook URL found for workflow {workflow_id}")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error fetching workflow webhook URL: {str(e)}")
+            return None

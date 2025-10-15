@@ -7,19 +7,65 @@ logger = logging.getLogger(__name__)
 
 
 class N8nService:
-    """Service for interacting with n8n workflows"""
+    """Service for interacting with n8n workflows via webhooks"""
     
     def __init__(self):
         self.base_url = os.getenv("N8N_BASE_URL", "http://localhost:5678")
-        self.api_key = os.getenv("N8N_API_KEY")
+        logger.info("N8nService initialized for webhook-based workflow triggering")
+    
+    async def trigger_workflow_webhook(
+        self,
+        webhook_url: str,
+        user_id: str,
+        parameters: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Trigger an n8n workflow via webhook URL (GET request)
         
-        if not self.api_key:
-            logger.warning("N8N_API_KEY not found in environment variables")
-        
-        self.headers = {
-            "X-N8N-API-KEY": self.api_key,
-            "Content-Type": "application/json"
-        }
+        Args:
+            webhook_url: Full webhook URL for the workflow
+            user_id: User's unique identifier
+            parameters: Workflow parameters to pass as query params
+            
+        Returns:
+            Dictionary containing execution result
+        """
+        try:
+            query_params = {
+                "user_id": user_id,
+                **parameters
+            }
+            
+            logger.info(f"Triggering workflow webhook: {webhook_url}")
+            
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    webhook_url,
+                    params=query_params,
+                    timeout=30.0
+                )
+                
+                if response.status_code == 200:
+                    result = response.json() if response.headers.get("content-type", "").startswith("application/json") else {"raw": response.text}
+                    logger.info(f"Workflow webhook triggered successfully")
+                    return {
+                        "success": True,
+                        "execution_id": result.get("executionId", f"webhook_{user_id}_{hash(webhook_url)}"),
+                        "data": result
+                    }
+                else:
+                    logger.error(f"Failed to trigger workflow webhook: {response.status_code}")
+                    return {
+                        "success": False,
+                        "error": f"HTTP {response.status_code}: {response.text}"
+                    }
+                    
+        except Exception as e:
+            logger.error(f"Error triggering n8n workflow webhook: {str(e)}")
+            return {
+                "success": False,
+                "error": str(e)
+            }
     
     async def trigger_workflow(
         self,
@@ -39,16 +85,9 @@ class N8nService:
             Dictionary containing execution result
         """
         try:
-            if not self.api_key:
-                logger.error("N8N_API_KEY not configured")
-                return {
-                    "success": False,
-                    "error": "N8N API key not configured"
-                }
-            
             # Prepare webhook URL or API endpoint
             # n8n supports both webhook triggers and API-based execution
-            url = f"{self.base_url}/api/v1/workflows/{workflow_id}/activate"
+            url = f"{self.base_url}/api/v1/workflows/{workflow_id}/execute"
             
             payload = {
                 "user_id": user_id,
@@ -59,7 +98,6 @@ class N8nService:
                 response = await client.post(
                     url,
                     json=payload,
-                    headers=self.headers,
                     timeout=30.0
                 )
                 
@@ -96,19 +134,11 @@ class N8nService:
             Dictionary containing execution status
         """
         try:
-            if not self.api_key:
-                logger.error("N8N_API_KEY not configured")
-                return {
-                    "success": False,
-                    "error": "N8N API key not configured"
-                }
-            
             url = f"{self.base_url}/api/v1/executions/{execution_id}"
             
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     url,
-                    headers=self.headers,
                     timeout=10.0
                 )
                 
@@ -144,16 +174,11 @@ class N8nService:
             Workflow details or None
         """
         try:
-            if not self.api_key:
-                logger.error("N8N_API_KEY not configured")
-                return None
-            
             url = f"{self.base_url}/api/v1/workflows/{workflow_id}"
             
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     url,
-                    headers=self.headers,
                     timeout=10.0
                 )
                 
@@ -187,10 +212,6 @@ class N8nService:
             n8n credential ID or None
         """
         try:
-            if not self.api_key:
-                logger.error("N8N_API_KEY not configured")
-                return None
-            
             # Map app_type to n8n credential type
             credential_type_map = {
                 "gmail": "gmailOAuth2",
@@ -229,7 +250,6 @@ class N8nService:
                 # Try to find existing credential
                 get_response = await client.get(
                     url,
-                    headers=self.headers,
                     params={"filter": f'{{"name": "{credential_name}"}}'},
                     timeout=10.0
                 )
@@ -245,7 +265,6 @@ class N8nService:
                         update_response = await client.patch(
                             update_url,
                             json=credential_data,
-                            headers=self.headers,
                             timeout=10.0
                         )
                         
@@ -257,7 +276,6 @@ class N8nService:
                         create_response = await client.post(
                             url,
                             json=credential_data,
-                            headers=self.headers,
                             timeout=10.0
                         )
                         
@@ -294,15 +312,8 @@ class N8nService:
             Dictionary containing execution result
         """
         try:
-            if not self.api_key:
-                logger.error("N8N_API_KEY not configured")
-                return {
-                    "success": False,
-                    "error": "N8N API key not configured"
-                }
-            
             # Prepare webhook URL or API endpoint
-            url = f"{self.base_url}/api/v1/workflows/{workflow_id}/activate"
+            url = f"{self.base_url}/api/v1/workflows/{workflow_id}/execute"
             
             # Include user credentials in the payload
             payload = {
@@ -315,7 +326,6 @@ class N8nService:
                 response = await client.post(
                     url,
                     json=payload,
-                    headers=self.headers,
                     timeout=30.0
                 )
                 

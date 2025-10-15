@@ -5,14 +5,11 @@ from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 import os
 import logging
-from dotenv import load_dotenv
 
 from services.gemini_service import GeminiService
 from services.supabase_service import SupabaseService
 from services.n8n_service import N8nService
 from services.proxy_service import ProxyService
-
-load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -304,42 +301,38 @@ async def connect_app(request: ConnectAppRequest):
 @app.post("/execute-workflow", response_model=ExecuteWorkflowResponse)
 async def execute_workflow(request: ExecuteWorkflowRequest):
     """
-    Execute n8n workflow with user-specific credentials
+    Execute n8n workflow via webhook with user-specific credentials
     
     Flow:
-    1. Verify user has necessary app connections
+    1. Fetch workflow webhook URL from database
     2. Retrieve user's credentials from Supabase
-    3. Trigger n8n workflow with user-specific credentials
+    3. Trigger n8n workflow via webhook GET request
     4. Save workflow execution to Supabase
     5. Return execution status
     """
     try:
         logger.info(f"Executing workflow {request.workflow_id} for user: {request.user_id}")
         
-        logger.info(f"Retrieving user credentials for workflow")
-        user_credentials = await supabase_service.get_user_workflow_credentials(
-            user_id=request.user_id,
-            workflow_id=request.workflow_id
-        )
+        logger.info(f"Fetching webhook URL for workflow: {request.workflow_id}")
+        webhook_url = await supabase_service.get_workflow_webhook_url(request.workflow_id)
         
-        if not user_credentials:
+        if not webhook_url:
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="User credentials not found for required apps"
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Webhook URL not found for workflow: {request.workflow_id}"
             )
         
-        logger.info(f"Triggering n8n workflow with user credentials: {request.workflow_id}")
-        execution_result = await n8n_service.trigger_workflow_with_credentials(
-            workflow_id=request.workflow_id,
+        logger.info(f"Triggering n8n workflow via webhook: {webhook_url}")
+        execution_result = await n8n_service.trigger_workflow_webhook(
+            webhook_url=webhook_url,
             user_id=request.user_id,
-            user_credentials=user_credentials,
             parameters=request.parameters or {}
         )
         
         if not execution_result.get("success"):
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to execute n8n workflow"
+                detail=f"Failed to execute n8n workflow: {execution_result.get('error')}"
             )
         
         execution_id = execution_result.get("execution_id")
@@ -363,6 +356,8 @@ async def execute_workflow(request: ExecuteWorkflowRequest):
             workflow_result=execution_result
         )
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error executing workflow: {str(e)}")
         raise HTTPException(
