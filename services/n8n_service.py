@@ -20,30 +20,35 @@ class N8nService:
         parameters: Dict[str, Any]
     ) -> Dict[str, Any]:
         """
-        Trigger an n8n workflow via webhook URL (GET request)
+        Trigger an n8n workflow via webhook URL (POST request with JSON body)
         
         Args:
             webhook_url: Full webhook URL for the workflow
             user_id: User's unique identifier
-            parameters: Workflow parameters to pass as query params
+            parameters: Workflow parameters to pass in request body
             
         Returns:
             Dictionary containing execution result
         """
         try:
-            query_params = {
+            payload = {
                 "user_id": user_id,
                 **parameters
             }
             
-            logger.info(f"Triggering workflow webhook: {webhook_url} {user_id}")
+            logger.info(f"Triggering workflow webhook: {webhook_url}")
+            logger.info(f"Webhook payload: {payload}")
             
             async with httpx.AsyncClient() as client:
-                response = await client.get(
+                response = await client.post(
                     webhook_url,
-                    params=query_params,
-                    timeout=30.0
+                    json=payload,
+                    timeout=60.0,
+                    headers={"Content-Type": "application/json"}
                 )
+                
+                logger.info(f"Webhook response status: {response.status_code}")
+                logger.info(f"Webhook response body: {response.text[:500]}")
                 
                 if response.status_code == 200:
                     result = response.json() if response.headers.get("content-type", "").startswith("application/json") else {"raw": response.text}
@@ -54,14 +59,14 @@ class N8nService:
                         "data": result
                     }
                 else:
-                    logger.error(f"Failed to trigger workflow webhook: {response.status_code}")
+                    logger.error(f"Failed to trigger workflow webhook: {response.status_code} - {response.text}")
                     return {
                         "success": False,
                         "error": f"HTTP {response.status_code}: {response.text}"
                     }
                     
         except Exception as e:
-            logger.error(f"Error triggering n8n workflow webhook: {str(e)}")
+            logger.error(f"Error triggering n8n workflow webhook: {str(e)}", exc_info=True)
             return {
                 "success": False,
                 "error": str(e)
@@ -87,7 +92,7 @@ class N8nService:
         try:
             # Prepare webhook URL or API endpoint
             # n8n supports both webhook triggers and API-based execution
-            url = f"{self.base_url}/api/v1/workflows/{workflow_id}/activate"
+            url = f"{self.base_url}/api/v1/workflows/{workflow_id}/execute"
             
             payload = {
                 "user_id": user_id,
