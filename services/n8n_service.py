@@ -36,7 +36,7 @@ class N8nService:
                 **parameters
             }
             
-            logger.info(f"Triggering workflow webhook: {webhook_url}")
+            logger.info(f"Triggering workflow webhook: {webhook_url} {user_id}")
             
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -87,7 +87,7 @@ class N8nService:
         try:
             # Prepare webhook URL or API endpoint
             # n8n supports both webhook triggers and API-based execution
-            url = f"{self.base_url}/api/v1/workflows/{workflow_id}/execute"
+            url = f"{self.base_url}/api/v1/workflows/{workflow_id}/activate"
             
             payload = {
                 "user_id": user_id,

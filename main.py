@@ -418,7 +418,7 @@ async def proxy_app_request(
     - gdrive: listFiles, uploadFile
     """
     try:
-        logger.info(f"Proxy request: {app_name}/{action} for user: {request.user_id}")
+        logger.info(f"Proxy request: {request} -> {app_name}/{action} for user: {request.user_id}")
         
         result = await proxy_service.proxy_request(
             user_id=request.user_id,
