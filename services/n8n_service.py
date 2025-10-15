@@ -48,7 +48,7 @@ class N8nService:
             
             # Prepare webhook URL or API endpoint
             # n8n supports both webhook triggers and API-based execution
-            url = f"{self.base_url}/api/v1/workflows/{workflow_id}/execute"
+            url = f"{self.base_url}/api/v1/workflows/{workflow_id}/activate"
             
             payload = {
                 "user_id": user_id,
