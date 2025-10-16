@@ -327,10 +327,22 @@ class SupabaseService:
                 logger.error("Supabase client not initialized")
                 return None
             
+            logger.info(f"[DEBUG] Fetching credentials - user_id: '{user_id}', app_name: '{app_name}'")
+            
+            # Validate user_id is not empty
+            if not user_id or user_id.strip() == "":
+                logger.error(f"[ERROR] user_id is empty or None! user_id value: '{user_id}'")
+                return None
+            
             # Normalize app_name to app_type (lowercase)
             app_type = app_name.lower()
             
+            logger.info(f"[DEBUG] Querying Supabase with user_id='{user_id}', app_type='{app_type}'")
+            
             response = self.client.table("user_credentials").select("credentials, metadata").eq("user_id", user_id).eq("app_type", app_type).eq("is_active", True).single().execute()
+            
+            logger.info(f"[DEBUG] Supabase response status: {response.status_code if hasattr(response, 'status_code') else 'N/A'}")
+            logger.info(f"[DEBUG] Supabase response data: {response.data}")
             
             if response.data and response.data.get("credentials"):
                 logger.info(f"Retrieved credentials for {app_name} for user {user_id}")
@@ -341,6 +353,7 @@ class SupabaseService:
             
         except Exception as e:
             logger.error(f"Error fetching app credentials: {str(e)}")
+            logger.exception(e)  # Add full exception traceback
             return None
     
     async def get_workflow_webhook_url(
@@ -374,3 +387,45 @@ class SupabaseService:
         except Exception as e:
             logger.error(f"Error fetching workflow webhook URL: {str(e)}")
             return None
+    
+    async def update_user_credentials(
+        self,
+        user_id: str,
+        app_name: str,
+        credentials: Dict[str, Any]
+    ) -> bool:
+        """
+        Update user's credentials in the database (e.g., after token refresh)
+        
+        Args:
+            user_id: User's unique identifier
+            app_name: Name of the app (e.g., "gmail", "slack")
+            credentials: Updated credentials dictionary
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            if not self.client:
+                logger.error("Supabase client not initialized")
+                return False
+            
+            app_type = app_name.lower()
+            
+            update_data = {
+                "credentials": credentials,
+                "updated_at": datetime.utcnow().isoformat()
+            }
+            
+            response = self.client.table("user_credentials").update(update_data).eq("user_id", user_id).eq("app_type", app_type).execute()
+            
+            if response.data:
+                logger.info(f"Updated credentials for {app_name} for user {user_id}")
+                return True
+            
+            logger.error(f"Failed to update credentials for {app_name}")
+            return False
+            
+        except Exception as e:
+            logger.error(f"Error updating user credentials: {str(e)}")
+            return False

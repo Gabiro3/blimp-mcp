@@ -1,8 +1,9 @@
 import logging
 import httpx
 from typing import Dict, Any, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 from services.supabase_service import SupabaseService
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,23 @@ class ProxyService:
                     "error": f"No credentials found for {app_name}. Please connect your account first."
                 }
             
+            if self._is_token_expired(credentials):
+                logger.info(f"Access token expired for user {user_id} and app {app_name}, attempting refresh...")
+                
+                refresh_result = await self._refresh_access_token(user_id, app_name, credentials)
+                
+                if not refresh_result["success"]:
+                    return {
+                        "success": False,
+                        "error": refresh_result.get("error", "Failed to refresh token"),
+                        "error_code": "TOKEN_REFRESH_FAILED",
+                        "requires_reconnect": True
+                    }
+                
+                # Use the new credentials
+                credentials = refresh_result["credentials"]
+                logger.info(f"Successfully refreshed token for {app_name}")
+            
             # Extract access token from credentials (handle nested structure)
             access_token = self._extract_access_token(credentials)
             
@@ -59,16 +77,6 @@ class ProxyService:
                     "success": False,
                     "error": f"Invalid credentials for {app_name}. Please reconnect your account.",
                     "error_code": "INVALID_CREDENTIALS"
-                }
-            
-            # Check if token is expired
-            if self._is_token_expired(credentials):
-                logger.warning(f"Access token expired for user {user_id} and app {app_name}")
-                return {
-                    "success": False,
-                    "error": f"Your {app_name} access token has expired. Please reconnect your account.",
-                    "error_code": "TOKEN_EXPIRED",
-                    "requires_reconnect": True
                 }
             
             logger.info(f"[DEBUG] Access token found for {app_name}, length: {len(access_token)}")
@@ -95,6 +103,135 @@ class ProxyService:
             return {
                 "success": False,
                 "error": str(e)
+            }
+    
+    async def _refresh_access_token(
+        self,
+        user_id: str,
+        app_name: str,
+        credentials: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Refresh expired access token using refresh token
+        
+        Args:
+            user_id: User's unique identifier
+            app_name: Name of the app
+            credentials: Current credentials with refresh_token
+            
+        Returns:
+            Dict with success status and new credentials
+        """
+        try:
+            refresh_token = credentials.get("refresh_token")
+            
+            if not refresh_token:
+                logger.error(f"No refresh token found for {app_name}")
+                return {
+                    "success": False,
+                    "error": "No refresh token available. Please reconnect your account."
+                }
+            
+            # Determine OAuth provider and token endpoint
+            token_endpoint = None
+            client_id = None
+            client_secret = None
+            
+            app_type = app_name.lower()
+            
+            # Google apps (Gmail, Calendar, Drive)
+            if app_type in ["gmail", "calendar", "gdrive"]:
+                token_endpoint = "https://oauth2.googleapis.com/token"
+                client_id = credentials.get("client_id") or os.getenv("GOOGLE_CLIENT_ID")
+                client_secret = credentials.get("client_secret") or os.getenv("GOOGLE_CLIENT_SECRET")
+            
+            # Slack
+            elif app_type == "slack":
+                token_endpoint = "https://slack.com/api/oauth.v2.access"
+                client_id = credentials.get("client_id") or os.getenv("SLACK_CLIENT_ID")
+                client_secret = credentials.get("client_secret") or os.getenv("SLACK_CLIENT_SECRET")
+            
+            # Notion
+            elif app_type == "notion":
+                token_endpoint = "https://api.notion.com/v1/oauth/token"
+                client_id = credentials.get("client_id") or os.getenv("NOTION_CLIENT_ID")
+                client_secret = credentials.get("client_secret") or os.getenv("NOTION_CLIENT_SECRET")
+            
+            else:
+                return {
+                    "success": False,
+                    "error": f"Token refresh not supported for {app_name}"
+                }
+            
+            if not token_endpoint or not client_id or not client_secret:
+                logger.error(f"Missing OAuth configuration for {app_name}")
+                return {
+                    "success": False,
+                    "error": "OAuth configuration missing. Please reconnect your account."
+                }
+            
+            # Make token refresh request
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                data = {
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh_token,
+                    "client_id": client_id,
+                    "client_secret": client_secret
+                }
+                
+                response = await client.post(token_endpoint, data=data)
+                response.raise_for_status()
+                
+                token_data = response.json()
+                
+                # Extract new access token
+                new_access_token = token_data.get("access_token")
+                new_refresh_token = token_data.get("refresh_token", refresh_token)  # Some providers don't return new refresh token
+                expires_in = token_data.get("expires_in", 3600)
+                
+                if not new_access_token:
+                    return {
+                        "success": False,
+                        "error": "Failed to obtain new access token"
+                    }
+                
+                # Calculate expiration time
+                expires_at = (datetime.utcnow() + timedelta(seconds=expires_in)).isoformat()
+                
+                # Update credentials
+                new_credentials = {
+                    **credentials,
+                    "access_token": new_access_token,
+                    "refresh_token": new_refresh_token,
+                    "expires_at": expires_at,
+                    "expires_in": expires_in
+                }
+                
+                # Save updated credentials to database
+                await self.supabase_service.update_user_credentials(
+                    user_id=user_id,
+                    app_name=app_name,
+                    credentials=new_credentials
+                )
+                
+                logger.info(f"Successfully refreshed token for {app_name}, expires at {expires_at}")
+                
+                return {
+                    "success": True,
+                    "credentials": new_credentials
+                }
+                
+        except httpx.HTTPStatusError as e:
+            logger.error(f"HTTP error refreshing token: {e.response.status_code} - {e.response.text}")
+            return {
+                "success": False,
+                "error": f"Failed to refresh token: {e.response.status_code}"
+            }
+        except Exception as e:
+            logger.error(f"Error refreshing token: {str(e)}")
+            return {
+                "success": False,
+                "error": f"Token refresh error: {str(e)}"
             }
     
     def _extract_access_token(self, credentials: Dict[str, Any]) -> Optional[str]:
