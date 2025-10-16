@@ -640,7 +640,8 @@ class ProxyService:
             }
             
             if action == "createEvent":
-                events = payload.get("events", [])
+                events = payload
+                print(events)
                 
                 # If no events array, check if this is a single event at the top level
                 if not events and payload.get("summary"):
