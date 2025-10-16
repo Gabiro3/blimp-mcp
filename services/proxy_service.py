@@ -1,6 +1,7 @@
 import logging
 import httpx
 from typing import Dict, Any, Optional
+from datetime import datetime
 from services.supabase_service import SupabaseService
 
 logger = logging.getLogger(__name__)
@@ -25,6 +26,15 @@ class ProxyService:
         Main proxy method that routes requests to appropriate app handlers
         """
         try:
+            logger.info(f"[DEBUG] proxy_request called with user_id: '{user_id}', app_name: '{app_name}', action: '{action}'")
+            
+            if not user_id or user_id.strip() == "":
+                logger.error(f"[ERROR] user_id is empty or None in proxy_request!")
+                return {
+                    "success": False,
+                    "error": "user_id is required but was not provided"
+                }
+            
             logger.info(f"Proxying {app_name}/{action} for user: {user_id}")
             
             # Fetch user credentials for the app
@@ -38,6 +48,30 @@ class ProxyService:
                     "success": False,
                     "error": f"No credentials found for {app_name}. Please connect your account first."
                 }
+            
+            # Extract access token from credentials (handle nested structure)
+            access_token = self._extract_access_token(credentials)
+            
+            if not access_token:
+                logger.error(f"No access token found in credentials for {app_name}")
+                logger.error(f"Credentials structure: {credentials}")
+                return {
+                    "success": False,
+                    "error": f"Invalid credentials for {app_name}. Please reconnect your account.",
+                    "error_code": "INVALID_CREDENTIALS"
+                }
+            
+            # Check if token is expired
+            if self._is_token_expired(credentials):
+                logger.warning(f"Access token expired for user {user_id} and app {app_name}")
+                return {
+                    "success": False,
+                    "error": f"Your {app_name} access token has expired. Please reconnect your account.",
+                    "error_code": "TOKEN_EXPIRED",
+                    "requires_reconnect": True
+                }
+            
+            logger.info(f"[DEBUG] Access token found for {app_name}, length: {len(access_token)}")
             
             # Route to appropriate handler based on app_name
             if app_name == "gmail":
@@ -63,6 +97,60 @@ class ProxyService:
                 "error": str(e)
             }
     
+    def _extract_access_token(self, credentials: Dict[str, Any]) -> Optional[str]:
+        """
+        Extract access token from credentials object.
+        Handles various credential structures.
+        """
+        # Try direct access
+        if "access_token" in credentials:
+            return credentials["access_token"]
+        
+        # Try nested in 'credentials' key
+        if "credentials" in credentials and isinstance(credentials["credentials"], dict):
+            if "access_token" in credentials["credentials"]:
+                return credentials["credentials"]["access_token"]
+        
+        # Try nested in 'data' key
+        if "data" in credentials and isinstance(credentials["data"], dict):
+            if "access_token" in credentials["data"]:
+                return credentials["data"]["access_token"]
+        
+        return None
+    
+    def _is_token_expired(self, credentials: Dict[str, Any]) -> bool:
+        """
+        Check if the access token is expired based on expires_at timestamp
+        """
+        try:
+            # Check for expires_at in various locations
+            expires_at = None
+            
+            if "expires_at" in credentials:
+                expires_at = credentials["expires_at"]
+            elif "credentials" in credentials and isinstance(credentials["credentials"], dict):
+                expires_at = credentials["credentials"].get("expires_at")
+            elif "metadata" in credentials and isinstance(credentials["metadata"], dict):
+                expires_at = credentials["metadata"].get("expires_at")
+            
+            if not expires_at:
+                # If no expiration info, assume token is valid
+                return False
+            
+            # Parse expiration timestamp
+            if isinstance(expires_at, str):
+                expires_at = datetime.fromisoformat(expires_at.replace('Z', '+00:00'))
+            elif isinstance(expires_at, (int, float)):
+                expires_at = datetime.fromtimestamp(expires_at)
+            
+            # Check if expired
+            return datetime.now() > expires_at
+            
+        except Exception as e:
+            logger.warning(f"Error checking token expiration: {str(e)}")
+            # If we can't determine expiration, assume token is valid
+            return False
+    
     async def _handle_gmail(
         self,
         action: str,
@@ -71,11 +159,21 @@ class ProxyService:
     ) -> Dict[str, Any]:
         """Handle Gmail API requests"""
         try:
-            access_token = credentials.get("access_token")
+            access_token = self._extract_access_token(credentials)
+            
+            if not access_token:
+                return {
+                    "success": False,
+                    "error": "No access token found for Gmail",
+                    "error_code": "MISSING_TOKEN"
+                }
+            
             headers = {
                 "Authorization": f"Bearer {access_token}",
                 "Content-Type": "application/json"
             }
+            
+            logger.info(f"[DEBUG] Making Gmail API request with token (first 10 chars): {access_token[:10]}...")
             
             if action == "fetchEmails":
                 query = payload.get("query", "is:unread")
@@ -83,6 +181,16 @@ class ProxyService:
                 
                 async with httpx.AsyncClient(timeout=self.timeout) as client:
                     response = await client.get(url, headers=headers)
+                    
+                    if response.status_code == 401:
+                        logger.error(f"Gmail API returned 401 Unauthorized. Token may be invalid or expired.")
+                        return {
+                            "success": False,
+                            "error": "Gmail access token is invalid or expired. Please reconnect your Gmail account.",
+                            "error_code": "TOKEN_INVALID",
+                            "requires_reconnect": True
+                        }
+                    
                     response.raise_for_status()
                     
                     messages = response.json().get("messages", [])
@@ -137,6 +245,20 @@ class ProxyService:
                     "error": f"Unsupported Gmail action: {action}"
                 }
                 
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 401:
+                logger.error(f"Gmail API 401 error: {str(e)}")
+                return {
+                    "success": False,
+                    "error": "Gmail access token is invalid or expired. Please reconnect your Gmail account.",
+                    "error_code": "TOKEN_INVALID",
+                    "requires_reconnect": True
+                }
+            logger.error(f"Gmail API HTTP error: {str(e)}")
+            return {
+                "success": False,
+                "error": f"Gmail API error: {str(e)}"
+            }
         except Exception as e:
             logger.error(f"Gmail API error: {str(e)}")
             return {
@@ -152,7 +274,15 @@ class ProxyService:
     ) -> Dict[str, Any]:
         """Handle Slack API requests"""
         try:
-            access_token = credentials.get("access_token")
+            access_token = self._extract_access_token(credentials)
+            
+            if not access_token:
+                return {
+                    "success": False,
+                    "error": "No access token found for Slack",
+                    "error_code": "MISSING_TOKEN"
+                }
+            
             headers = {
                 "Authorization": f"Bearer {access_token}",
                 "Content-Type": "application/json"
@@ -199,6 +329,19 @@ class ProxyService:
                     "error": f"Unsupported Slack action: {action}"
                 }
                 
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 401:
+                return {
+                    "success": False,
+                    "error": "Slack access token is invalid or expired. Please reconnect your Slack account.",
+                    "error_code": "TOKEN_INVALID",
+                    "requires_reconnect": True
+                }
+            logger.error(f"Slack API error: {str(e)}")
+            return {
+                "success": False,
+                "error": f"Slack API error: {str(e)}"
+            }
         except Exception as e:
             logger.error(f"Slack API error: {str(e)}")
             return {
@@ -214,7 +357,15 @@ class ProxyService:
     ) -> Dict[str, Any]:
         """Handle Notion API requests"""
         try:
-            access_token = credentials.get("access_token")
+            access_token = self._extract_access_token(credentials)
+            
+            if not access_token:
+                return {
+                    "success": False,
+                    "error": "No access token found for Notion",
+                    "error_code": "MISSING_TOKEN"
+                }
+            
             headers = {
                 "Authorization": f"Bearer {access_token}",
                 "Content-Type": "application/json",
@@ -292,6 +443,19 @@ class ProxyService:
                     "error": f"Unsupported Notion action: {action}"
                 }
                 
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 401:
+                return {
+                    "success": False,
+                    "error": "Notion access token is invalid or expired. Please reconnect your Notion account.",
+                    "error_code": "TOKEN_INVALID",
+                    "requires_reconnect": True
+                }
+            logger.error(f"Notion API error: {str(e)}")
+            return {
+                "success": False,
+                "error": f"Notion API error: {str(e)}"
+            }
         except Exception as e:
             logger.error(f"Notion API error: {str(e)}")
             return {
@@ -307,7 +471,15 @@ class ProxyService:
     ) -> Dict[str, Any]:
         """Handle Google Calendar API requests"""
         try:
-            access_token = credentials.get("access_token")
+            access_token = self._extract_access_token(credentials)
+            
+            if not access_token:
+                return {
+                    "success": False,
+                    "error": "No access token found for Google Calendar",
+                    "error_code": "MISSING_TOKEN"
+                }
+            
             headers = {
                 "Authorization": f"Bearer {access_token}",
                 "Content-Type": "application/json"
@@ -359,6 +531,19 @@ class ProxyService:
                     "error": f"Unsupported Calendar action: {action}"
                 }
                 
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 401:
+                return {
+                    "success": False,
+                    "error": "Google Calendar access token is invalid or expired. Please reconnect your Google account.",
+                    "error_code": "TOKEN_INVALID",
+                    "requires_reconnect": True
+                }
+            logger.error(f"Calendar API error: {str(e)}")
+            return {
+                "success": False,
+                "error": f"Calendar API error: {str(e)}"
+            }
         except Exception as e:
             logger.error(f"Calendar API error: {str(e)}")
             return {
@@ -374,7 +559,15 @@ class ProxyService:
     ) -> Dict[str, Any]:
         """Handle Google Drive API requests"""
         try:
-            access_token = credentials.get("access_token")
+            access_token = self._extract_access_token(credentials)
+            
+            if not access_token:
+                return {
+                    "success": False,
+                    "error": "No access token found for Google Drive",
+                    "error_code": "MISSING_TOKEN"
+                }
+            
             headers = {
                 "Authorization": f"Bearer {access_token}",
                 "Content-Type": "application/json"
@@ -434,6 +627,19 @@ class ProxyService:
                     "error": f"Unsupported Google Drive action: {action}"
                 }
                 
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 401:
+                return {
+                    "success": False,
+                    "error": "Google Drive access token is invalid or expired. Please reconnect your Google account.",
+                    "error_code": "TOKEN_INVALID",
+                    "requires_reconnect": True
+                }
+            logger.error(f"Google Drive API error: {str(e)}")
+            return {
+                "success": False,
+                "error": f"Google Drive API error: {str(e)}"
+            }
         except Exception as e:
             logger.error(f"Google Drive API error: {str(e)}")
             return {
