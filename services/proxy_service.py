@@ -624,16 +624,47 @@ class ProxyService:
             
             if action == "createEvent":
                 events = payload.get("events", [])
+                
+                # If no events array, check if this is a single event at the top level
+                if not events and payload.get("summary"):
+                    events = [payload]
+                
                 calendar_id = payload.get("calendar_id", "primary")
+                
+                logger.info(f"[v0] Creating {len(events)} calendar events")
                 
                 url = f"https://www.googleapis.com/calendar/v3/calendars/{calendar_id}/events"
                 
                 created_events = []
                 async with httpx.AsyncClient(timeout=self.timeout) as client:
-                    for event in events:
-                        response = await client.post(url, headers=headers, json=event)
+                    for event_data in events:
+                        calendar_event = {
+                            "summary": event_data.get("summary", "No Title"),
+                            "description": event_data.get("description", ""),
+                            "start": {
+                                "dateTime": event_data.get("start_time"),
+                                "timeZone": event_data.get("timezone", "UTC")
+                            },
+                            "end": {
+                                "dateTime": event_data.get("end_time"),
+                                "timeZone": event_data.get("timezone", "UTC")
+                            }
+                        }
+                        
+                        attendees = event_data.get("attendees", [])
+                        if attendees:
+                            calendar_event["attendees"] = [
+                                {"email": email} if isinstance(email, str) else email
+                                for email in attendees
+                            ]
+                        
+                        logger.info(f"[v0] Creating event: {calendar_event['summary']}")
+                        
+                        response = await client.post(url, headers=headers, json=calendar_event)
                         response.raise_for_status()
                         created_events.append(response.json())
+                
+                logger.info(f"[v0] Successfully created {len(created_events)} events")
                 
                 return {
                     "success": True,
