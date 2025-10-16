@@ -272,21 +272,38 @@ class ProxyService:
             
             if not expires_at:
                 # If no expiration info, assume token is valid
+                logger.warning("No expiration info found in credentials, assuming token is valid")
                 return False
             
             # Parse expiration timestamp
             if isinstance(expires_at, str):
-                expires_at = datetime.fromisoformat(expires_at.replace('Z', '+00:00'))
+                # Remove 'Z' and parse as UTC
+                expires_at_str = expires_at.replace('Z', '')
+                if '+' in expires_at_str or expires_at_str.endswith('+00:00'):
+                    expires_at_dt = datetime.fromisoformat(expires_at_str.replace('+00:00', ''))
+                else:
+                    expires_at_dt = datetime.fromisoformat(expires_at_str)
             elif isinstance(expires_at, (int, float)):
-                expires_at = datetime.fromtimestamp(expires_at)
+                expires_at_dt = datetime.utcfromtimestamp(expires_at)
+            else:
+                expires_at_dt = expires_at
             
-            # Check if expired
-            return datetime.now() > expires_at
+            # Get current time in UTC
+            current_time = datetime.utcnow()
+            
+            # Add a 5-minute buffer to refresh tokens before they actually expire
+            buffer_minutes = 5
+            is_expired = current_time >= (expires_at_dt - timedelta(minutes=buffer_minutes))
+            
+            if is_expired:
+                logger.info(f"Token is expired or expiring soon. Current time (UTC): {current_time}, Expires at: {expires_at_dt}")
+            
+            return is_expired
             
         except Exception as e:
             logger.warning(f"Error checking token expiration: {str(e)}")
-            # If we can't determine expiration, assume token is valid
-            return False
+            # If we can't determine expiration, assume token needs refresh to be safe
+            return True
     
     async def _handle_gmail(
         self,
