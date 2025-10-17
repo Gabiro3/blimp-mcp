@@ -271,7 +271,7 @@ async def connect_app(request: ConnectAppRequest):
         logger.info(f"Creating n8n credentials for user {request.user_id}")
         n8n_credential_id = await supabase_service.store_user_credentials(
             user_id=request.user_id,
-            app_name=f"{request.user_id}_{request.app_type}",  # You can change this as needed
+            app_name=request.app_name,  # You can change this as needed
             app_type=request.app_type,
             credentials=request.credentials.dict(),
             metadata={}  # Adjust this based on what metadata needs to be stored
