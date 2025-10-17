@@ -2,7 +2,7 @@ import os
 import json
 import logging
 import re
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 import google.generativeai as genai
 
 logger = logging.getLogger(__name__)
@@ -18,6 +18,82 @@ class GeminiService:
         else:
             genai.configure(api_key=self.api_key)
             self.model = genai.GenerativeModel('gemini-2.0-flash-exp')
+    async def analyze_prompt(
+        self, 
+        prompt: str,
+        workflow_templates: Optional[List[Dict[str, Any]]] = None
+    ) -> Dict[str, Any]:
+        """
+        Send prompt to Gemini and analyze what apps are needed.
+        
+        Args:
+            prompt: User's automation request
+            workflow_templates: List of available workflow templates from database
+            
+        Returns:
+            Dictionary containing either workflow_id (for existing templates) or workflow_json (for custom workflows)
+        """
+        try:
+            templates_section = ""
+            if workflow_templates and len(workflow_templates) > 0:
+                templates_section = "\n\nAVAILABLE WORKFLOW TEMPLATES:\n"
+                for template in workflow_templates:
+                    templates_section += f"""
+- ID: {template['id']}
+  Name: {template['name']}
+  Description: {template['description']}
+  Required Apps: {', '.join(template['required_apps'])}
+  Category: {template.get('category', 'general')}
+"""
+            
+            system_prompt = f"""You are an AI assistant for an automation platform called Blimp. 
+Analyze the user's request and determine the best workflow solution.
+
+{templates_section}
+
+TASK:
+1. If the user's request matches one of the available workflow templates above, return the workflow_id
+IMPORTANT: Respond ONLY with valid JSON. No markdown, no explanations, just the JSON object.
+
+RESPONSE FORMAT:
+
+For matching existing template:
+{{
+  "match_type": "existing_template",
+  "workflow_id": "template-id-here",
+  "required_apps": ["app1", "app2"],
+  "confidence": 0.95,
+  "reasoning": "Brief explanation of why this template matches"
+}}
+
+User request: {prompt}"""
+            
+            response = self.model.generate_content(
+                system_prompt,
+                generation_config=genai.types.GenerationConfig(
+                    temperature=0.3,
+                )
+            )
+            
+            response_text = response.text.strip()
+            
+            logger.info(f"Raw Gemini response: {response_text[:500]}")
+            
+            parsed_response = self._extract_and_parse_json(response_text)
+            
+            parsed_response = self._validate_workflow_response(parsed_response, prompt)
+            
+            logger.info(f"Gemini analysis complete: {json.dumps(parsed_response, indent=2)[:500]}")
+            return parsed_response
+            
+        except Exception as e:
+            logger.error(f"Error calling Gemini API: {str(e)}", exc_info=True)
+            return {
+                "match_type": "error",
+                "required_apps": [],
+                "error": str(e),
+                "reasoning": "Error occurred during analysis"
+            }
     
     async def analyze_prompt_with_functions(
         self, 

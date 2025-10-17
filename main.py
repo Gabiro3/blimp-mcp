@@ -163,10 +163,12 @@ async def process_prompt(request: PromptRequest):
     """
     try:
         logger.info(f"Processing prompt for user: {request.user_id}")
+        logger.info("Fetching all workflow templates from Supabase")
+        templates = await supabase_service.get_all_workflow_templates()
         
         # Step 1: Send prompt to Gemini for analysis
         logger.info("Sending prompt to Gemini 2.5 Flash")
-        gemini_response = await gemini_service.analyze_prompt(request.prompt)
+        gemini_response = await gemini_service.analyze_prompt(request.prompt, templates)
         
         if not gemini_response:
             raise HTTPException(
