@@ -312,7 +312,7 @@ class ProxyService:
                     **credentials,
                     "access_token": new_access_token,
                     "refresh_token": new_refresh_token,
-                    "expires_at": expires_at,
+                    "expiry_date": expires_at,
                     "expires_in": expires_in
                 }
                 
@@ -360,12 +360,12 @@ class ProxyService:
         try:
             expires_at = None
             
-            if "expires_at" in credentials:
-                expires_at = credentials["expires_at"]
+            if "expiry_date" in credentials:
+                expires_at = credentials["expiry_date"]
             elif "credentials" in credentials and isinstance(credentials["credentials"], dict):
-                expires_at = credentials["credentials"].get("expires_at")
+                expires_at = credentials["credentials"].get("expiry_date")
             elif "metadata" in credentials and isinstance(credentials["metadata"], dict):
-                expires_at = credentials["metadata"].get("expires_at")
+                expires_at = credentials["metadata"].get("expiry_date")
             
             if not expires_at:
                 logger.warning("No expiration info found in credentials, assuming token is valid")
