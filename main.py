@@ -169,7 +169,8 @@ async def process_prompt(request: PromptRequest):
         
         # Step 1: Send prompt to Gemini for analysis
         logger.info("Sending prompt to Gemini 2.5 Flash")
-        gemini_response = await gemini_service.analyze_prompt(request.prompt)
+        templates = await supabase_service.get_all_workflow_templates()
+        gemini_response = await gemini_service.analyze_prompt(request.prompt, templates)
         
         if not gemini_response:
             raise HTTPException(
@@ -316,16 +317,25 @@ async def execute_workflow(request: ExecuteWorkflowRequest):
     try:
         logger.info(f"Executing workflow for user: {request.user_id}")
         
+        workflow_found = False
+        workflow_data = None
+        
         if request.workflow_id:
             logger.info(f"Executing workflow by ID: {request.workflow_id}")
             # Fetch workflow from database
             workflow = await supabase_service.get_workflow(request.workflow_id, request.user_id)
-            if not workflow:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail=f"Workflow {request.workflow_id} not found"
-                )
-            prompt = workflow.get("prompt", "")
+            if workflow:
+                workflow_found = True
+                workflow_data = workflow
+                prompt = workflow.get("prompt", "")
+            else:
+                logger.warning(f"Workflow {request.workflow_id} not found, continuing with prompt")
+                if not request.prompt:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=f"Workflow {request.workflow_id} not found and no prompt provided"
+                    )
+                prompt = request.prompt
         elif request.prompt:
             prompt = request.prompt
         else:
@@ -392,6 +402,21 @@ async def execute_workflow(request: ExecuteWorkflowRequest):
             if store_as:
                 stored_results[store_as] = result
         
+        if not workflow_found and request.workflow_id:
+            logger.info(f"Saving workflow {request.workflow_id} to user_workflows table")
+            workflow_name = initial_analysis.get("workflow_name", "Custom Workflow")
+            workflow_description = initial_analysis.get("description", prompt[:200])
+            
+            await supabase_service.save_user_workflow(
+                user_id=request.user_id,
+                workflow_id=request.workflow_id,
+                name=workflow_name,
+                description=workflow_description,
+                prompt=prompt,
+                required_apps=required_apps,
+                category="custom"
+            )
+        
         logger.info(f"Workflow execution complete with {len(results)} results")
         
         return ExecuteWorkflowResponse(
@@ -409,7 +434,6 @@ async def execute_workflow(request: ExecuteWorkflowRequest):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error executing workflow: {str(e)}"
         )
-
 
 def _resolve_parameters(parameters: Dict[str, Any], stored_results: Dict[str, Any]) -> Dict[str, Any]:
     """

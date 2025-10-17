@@ -454,3 +454,112 @@ class SupabaseService:
         except Exception as e:
             logger.error(f"Error fetching workflow templates: {str(e)}")
             return []
+    
+    async def get_workflow(
+        self,
+        workflow_id: str,
+        user_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Get a specific workflow by ID for a user
+        
+        Args:
+            workflow_id: Workflow identifier
+            user_id: User's unique identifier
+            
+        Returns:
+            Workflow data dictionary or None if not found
+        """
+        try:
+            if not self.client:
+                logger.error("Supabase client not initialized")
+                return None
+            
+            logger.info(f"Fetching workflow {workflow_id} for user {user_id}")
+            
+            # Try to fetch from workflow_templates first (for predefined workflows)
+            response = self.client.table("workflow_templates").select("*").eq("id", workflow_id).eq("is_active", True).single().execute()
+            
+            if response.data:
+                logger.info(f"Found workflow template: {workflow_id}")
+                return response.data
+            
+            # If not found in templates, try user-specific workflows
+            response = self.client.table("user_workflows").select("*").eq("id", workflow_id).eq("user_id", user_id).eq("is_active", True).single().execute()
+            
+            if response.data:
+                logger.info(f"Found user workflow: {workflow_id}")
+                return response.data
+            
+            logger.warning(f"Workflow {workflow_id} not found for user {user_id}")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error fetching workflow: {str(e)}")
+            logger.exception(e)
+            return None
+    
+    async def save_user_workflow(
+        self,
+        user_id: str,
+        workflow_id: str,
+        name: str,
+        description: str,
+        prompt: str,
+        required_apps: List[str],
+        category: Optional[str] = None,
+        webhook_url: Optional[str] = None
+    ) -> bool:
+        """
+        Save a user-specific workflow to the database
+        
+        Args:
+            user_id: User's unique identifier
+            workflow_id: Workflow identifier
+            name: Workflow name
+            description: Workflow description
+            prompt: Original prompt that created this workflow
+            required_apps: List of required app names
+            category: Optional category
+            webhook_url: Optional webhook URL
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            if not self.client:
+                logger.error("Supabase client not initialized")
+                return False
+            
+            data = {
+                "id": workflow_id,
+                "user_id": user_id,
+                "name": name,
+                "description": description,
+                "prompt": prompt,
+                "required_apps": required_apps,
+                "category": category or "custom",
+                "webhook_url": webhook_url,
+                "is_active": True,
+                "created_at": datetime.utcnow().isoformat(),
+                "updated_at": datetime.utcnow().isoformat()
+            }
+            
+            # Check if workflow already exists
+            existing = self.client.table("user_workflows").select("id").eq("id", workflow_id).eq("user_id", user_id).execute()
+            
+            if existing.data:
+                # Update existing workflow
+                response = self.client.table("user_workflows").update(data).eq("id", workflow_id).eq("user_id", user_id).execute()
+                logger.info(f"Updated user workflow: {workflow_id}")
+            else:
+                # Insert new workflow
+                response = self.client.table("user_workflows").insert(data).execute()
+                logger.info(f"Saved new user workflow: {workflow_id}")
+            
+            return bool(response.data)
+            
+        except Exception as e:
+            logger.error(f"Error saving user workflow: {str(e)}")
+            logger.exception(e)
+            return False
