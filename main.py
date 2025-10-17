@@ -429,6 +429,10 @@ async def proxy_app_request(
             action=action,
             payload=request.payload
         )
+        logger.info("------------------------")
+        logger.info(f"Proxy result: {result}")
+        logger.info(f"Proxy result: {result}")
+        logger.info(f"Proxy result: {result}")
         
         if result.get("success"):
             return ProxyResponse(

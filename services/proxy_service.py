@@ -79,7 +79,7 @@ class ProxyService:
                     "error_code": "INVALID_CREDENTIALS"
                 }
             
-            logger.info(f"[DEBUG] Access token found for {app_name}, length: {len(access_token)}")
+            logger.info(f"[DEBUG] Access token found for {app_name}, length: {len(access_token)} payload: {payload}")
             
             # Route to appropriate handler based on app_name
             if app_name == "gmail":
