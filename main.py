@@ -308,51 +308,52 @@ async def execute_workflow(request: ExecuteWorkflowRequest):
     No n8n dependency - everything runs in the MCP server.
     
     Flow:
-    1. Analyze prompt to get required apps
-    2. Get available functions for those apps
-    3. Have Gemini generate function calls
+    1. If workflow_id provided, fetch workflow from database
+    2. If workflow found in DB, use its stored structure
+    3. If not found or no workflow_id, analyze prompt with Gemini to get function calls
     4. Execute function calls in sequence
-    5. Return results
+    5. Save workflow to user_workflows if it was newly generated
     """
     try:
         logger.info(f"Executing workflow for user: {request.user_id}")
         
         workflow_found = False
         workflow_data = None
+        prompt = None
         
         if request.workflow_id:
-            logger.info(f"Executing workflow by ID: {request.workflow_id}")
-            # Fetch workflow from database
+            logger.info(f"Attempting to fetch workflow by ID: {request.workflow_id}")
             workflow = await supabase_service.get_workflow(request.workflow_id, request.user_id)
             if workflow:
                 workflow_found = True
                 workflow_data = workflow
                 prompt = workflow.get("prompt", "")
+                logger.info(f"Workflow {request.workflow_id} found in database")
             else:
-                logger.warning(f"Workflow {request.workflow_id} not found, continuing with prompt")
-                if not request.prompt:
-                    raise HTTPException(
-                        status_code=status.HTTP_404_NOT_FOUND,
-                        detail=f"Workflow {request.workflow_id} not found and no prompt provided"
-                    )
-                prompt = request.prompt
-        elif request.prompt:
-            prompt = request.prompt
-        else:
+                logger.warning(f"Workflow {request.workflow_id} not found in database")
+        
+        # If no workflow found and no prompt provided, error
+        if not workflow_found and not request.prompt:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Either workflow_id or prompt must be provided"
+                detail="Either workflow_id must exist in database or prompt must be provided"
             )
         
-        logger.info("Analyzing prompt with Gemini")
-        initial_analysis = await gemini_service.analyze_prompt(prompt)
-        required_apps = initial_analysis.get("required_apps", [])
+        # Use provided prompt if workflow not found
+        if not workflow_found:
+            prompt = request.prompt
+            logger.info("Using provided prompt for workflow generation")
         
-        logger.info(f"Required apps: {required_apps}")
+        logger.info("Analyzing prompt and generating function calls with Gemini")
         
-        available_functions = get_functions_for_apps(required_apps)
+        # Get connected apps for this user to determine available functions
+        connected_apps = await supabase_service.get_user_connected_apps(request.user_id)
+        logger.info(f"User has {len(connected_apps)} connected apps: {connected_apps}")
         
-        logger.info("Generating function calls with Gemini")
+        # Get available functions for connected apps
+        available_functions = get_functions_for_apps(connected_apps)
+        
+        # Single call to Gemini to get the complete execution plan
         function_plan = await gemini_service.analyze_prompt_with_functions(
             prompt,
             available_functions
@@ -360,16 +361,17 @@ async def execute_workflow(request: ExecuteWorkflowRequest):
         
         function_calls = function_plan.get("function_calls", [])
         reasoning = function_plan.get("reasoning", "")
+        required_apps = function_plan.get("required_apps", [])
         
         if not function_calls:
             return ExecuteWorkflowResponse(
                 status="error",
-                message="No function calls generated",
+                message="No function calls generated. Please provide more details in your prompt.",
                 results=[],
                 reasoning=reasoning
             )
         
-        logger.info(f"Executing {len(function_calls)} function calls")
+        logger.info(f"Generated {len(function_calls)} function calls to execute")
         
         results = []
         stored_results = {}
@@ -377,35 +379,56 @@ async def execute_workflow(request: ExecuteWorkflowRequest):
         for i, call in enumerate(function_calls):
             app = call.get("app")
             function = call.get("function")
-            parameters = {**request.parameters, **call.get("parameters", {})} if request.parameters else call.get("parameters", {})
+            parameters = call.get("parameters", {})
+            
+            # Merge request parameters if provided
+            if request.parameters:
+                parameters = {**parameters, **request.parameters}
+            
             store_as = call.get("store_result_as")
             
-            logger.info(f"Executing call {i+1}/{len(function_calls)}: {app}.{function}")
+            logger.info(f"Executing step {i+1}/{len(function_calls)}: {app}.{function}")
             
             # Replace parameter references with stored results
             parameters = _resolve_parameters(parameters, stored_results)
             
-            # Execute function
-            result = await proxy_service.execute_function_call(
-                user_id=request.user_id,
-                app_name=app,
-                function_name=function,
-                parameters=parameters
-            )
-            
-            results.append({
-                "call": f"{app}.{function}",
-                "result": result
-            })
-            
-            # Store result if needed
-            if store_as:
-                stored_results[store_as] = result
+            try:
+                # Execute function
+                result = await proxy_service.execute_function_call(
+                    user_id=request.user_id,
+                    app_name=app,
+                    function_name=function,
+                    parameters=parameters
+                )
+                
+                results.append({
+                    "step": i + 1,
+                    "call": f"{app}.{function}",
+                    "status": "success",
+                    "result": result
+                })
+                
+                # Store result if needed for next steps
+                if store_as:
+                    stored_results[store_as] = result
+                    logger.info(f"Stored result as '{store_as}' for future steps")
+                    
+            except Exception as e:
+                logger.error(f"Error executing {app}.{function}: {str(e)}")
+                results.append({
+                    "step": i + 1,
+                    "call": f"{app}.{function}",
+                    "status": "error",
+                    "error": str(e)
+                })
+                # Continue with remaining steps even if one fails
         
         if not workflow_found and request.workflow_id:
-            logger.info(f"Saving workflow {request.workflow_id} to user_workflows table")
-            workflow_name = initial_analysis.get("workflow_name", "Custom Workflow")
-            workflow_description = initial_analysis.get("description", prompt[:200])
+            logger.info(f"Saving newly generated workflow {request.workflow_id} to user_workflows")
+            
+            # Generate workflow name from prompt
+            workflow_name = prompt[:50] + "..." if len(prompt) > 50 else prompt
+            workflow_description = f"Custom workflow: {prompt[:200]}"
             
             await supabase_service.save_user_workflow(
                 user_id=request.user_id,
@@ -416,12 +439,16 @@ async def execute_workflow(request: ExecuteWorkflowRequest):
                 required_apps=required_apps,
                 category="custom"
             )
+            logger.info("Workflow saved successfully for future reuse")
         
-        logger.info(f"Workflow execution complete with {len(results)} results")
+        # Count successful executions
+        successful_steps = sum(1 for r in results if r.get("status") == "success")
+        
+        logger.info(f"Workflow execution complete: {successful_steps}/{len(results)} steps successful")
         
         return ExecuteWorkflowResponse(
-            status="success",
-            message=f"Executed {len(results)} function calls successfully",
+            status="success" if successful_steps == len(results) else "partial_success",
+            message=f"Executed {successful_steps}/{len(results)} steps successfully",
             results=results,
             reasoning=reasoning
         )
@@ -429,12 +456,11 @@ async def execute_workflow(request: ExecuteWorkflowRequest):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error executing workflow: {str(e)}")
+        logger.error(f"Error executing workflow: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error executing workflow: {str(e)}"
         )
-
 def _resolve_parameters(parameters: Dict[str, Any], stored_results: Dict[str, Any]) -> Dict[str, Any]:
     """
     Resolve parameter references like {{ variable_name }} with stored results.
