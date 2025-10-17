@@ -467,6 +467,7 @@ def _resolve_parameters(parameters: Dict[str, Any], stored_results: Dict[str, An
     import re
 
     resolved = {}
+    print(parameters)
 
     for key, value in parameters.items():
         if isinstance(value, str) and "{{" in value and "}}" in value:
