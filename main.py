@@ -63,7 +63,10 @@ class PromptResponse(BaseModel):
 
 class ExecuteWorkflowRequest(BaseModel):
     user_id: str
-    prompt: str
+    workflow_id: Optional[str] = None
+    prompt: Optional[str] = None
+    bearer_token: Optional[str] = None
+    parameters: Optional[Dict[str, Any]] = None
 
 
 class ExecuteWorkflowResponse(BaseModel):
@@ -163,12 +166,10 @@ async def process_prompt(request: PromptRequest):
     """
     try:
         logger.info(f"Processing prompt for user: {request.user_id}")
-        logger.info("Fetching all workflow templates from Supabase")
-        templates = await supabase_service.get_all_workflow_templates()
         
         # Step 1: Send prompt to Gemini for analysis
         logger.info("Sending prompt to Gemini 2.5 Flash")
-        gemini_response = await gemini_service.analyze_prompt(request.prompt, templates)
+        gemini_response = await gemini_service.analyze_prompt(request.prompt)
         
         if not gemini_response:
             raise HTTPException(
@@ -315,8 +316,26 @@ async def execute_workflow(request: ExecuteWorkflowRequest):
     try:
         logger.info(f"Executing workflow for user: {request.user_id}")
         
+        if request.workflow_id:
+            logger.info(f"Executing workflow by ID: {request.workflow_id}")
+            # Fetch workflow from database
+            workflow = await supabase_service.get_workflow(request.workflow_id, request.user_id)
+            if not workflow:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Workflow {request.workflow_id} not found"
+                )
+            prompt = workflow.get("prompt", "")
+        elif request.prompt:
+            prompt = request.prompt
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Either workflow_id or prompt must be provided"
+            )
+        
         logger.info("Analyzing prompt with Gemini")
-        initial_analysis = await gemini_service.analyze_prompt(request.prompt)
+        initial_analysis = await gemini_service.analyze_prompt(prompt)
         required_apps = initial_analysis.get("required_apps", [])
         
         logger.info(f"Required apps: {required_apps}")
@@ -325,7 +344,7 @@ async def execute_workflow(request: ExecuteWorkflowRequest):
         
         logger.info("Generating function calls with Gemini")
         function_plan = await gemini_service.analyze_prompt_with_functions(
-            request.prompt,
+            prompt,
             available_functions
         )
         
@@ -348,7 +367,7 @@ async def execute_workflow(request: ExecuteWorkflowRequest):
         for i, call in enumerate(function_calls):
             app = call.get("app")
             function = call.get("function")
-            parameters = call.get("parameters", {})
+            parameters = {**request.parameters, **call.get("parameters", {})} if request.parameters else call.get("parameters", {})
             store_as = call.get("store_result_as")
             
             logger.info(f"Executing call {i+1}/{len(function_calls)}: {app}.{function}")
@@ -382,6 +401,8 @@ async def execute_workflow(request: ExecuteWorkflowRequest):
             reasoning=reasoning
         )
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error executing workflow: {str(e)}")
         raise HTTPException(
