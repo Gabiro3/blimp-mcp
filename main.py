@@ -467,6 +467,9 @@ def _resolve_parameters(parameters: Dict[str, Any], stored_results: Dict[str, An
     Supports nested access like {{ emails[0].subject }} and {{ user.name }}
     """
     import re
+
+    print(parameters)
+    print(stored_results)
     
     resolved = {}
     for key, value in parameters.items():
@@ -474,6 +477,7 @@ def _resolve_parameters(parameters: Dict[str, Any], stored_results: Dict[str, An
             # Extract variable references
             pattern = r'\{\{\s*([^}]+)\s*\}\}'
             matches = re.findall(pattern, value)
+            print(matches)
             
             for match in matches:
                 try:

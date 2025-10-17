@@ -108,10 +108,14 @@ class ProxyService:
         """Execute Gmail helper function."""
         try:
             if function_name == "list_messages":
+                print(parameters)
+                logger.info(f"Parameters for list_messages: {parameters}")
                 return await self.gmail_helpers.list_messages(access_token, **parameters)
             elif function_name == "get_message":
+                logger.info(f"Parameters for get_message: {parameters}")
                 return await self.gmail_helpers.get_message(access_token, **parameters)
             elif function_name == "send_message":
+                logger.info(f"Parameters for send_message: {parameters}")
                 return await self.gmail_helpers.send_message(access_token, **parameters)
             elif function_name == "delete_message":
                 return await self.gmail_helpers.delete_message(access_token, **parameters)
