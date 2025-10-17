@@ -269,12 +269,14 @@ async def connect_app(request: ConnectAppRequest):
         
         # Step 3: Create/update n8n credentials for this user
         logger.info(f"Creating n8n credentials for user {request.user_id}")
-        n8n_credential_id = await proxy_service.create_user_credential(
+        n8n_credential_id = await supabase_service.store_user_credentials(
             user_id=request.user_id,
+            app_name=f"{request.user_id}_{request.app_type}",  # You can change this as needed
             app_type=request.app_type,
             credentials=request.credentials.dict(),
-            credential_name=f"{request.user_id}_{request.app_type}"
-        )
+            metadata={}  # Adjust this based on what metadata needs to be stored
+  )
+
         
         if not n8n_credential_id:
             logger.warning(f"Failed to create n8n credential, but Supabase storage succeeded")

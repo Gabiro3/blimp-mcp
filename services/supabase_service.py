@@ -563,3 +563,64 @@ class SupabaseService:
             logger.error(f"Error saving user workflow: {str(e)}")
             logger.exception(e)
             return False
+
+
+    async def store_user_credentials(
+        self,
+        user_id: str,
+        app_name: str,
+        app_type: str,
+        credentials: Dict[str, Any],
+        metadata: Dict[str, Any]
+    ) -> Optional[str]:
+        """
+        Store user's OAuth credentials for an app
+        
+        Args:
+            user_id: User's unique identifier
+            app_name: Name of the app (e.g., "Gmail")
+            app_type: Type of the app (e.g., "gmail")
+            credentials: OAuth credentials (access_token, refresh_token, etc.)
+            metadata: Additional metadata (email, scopes, etc.)
+            
+        Returns:
+            Credential ID if successful, None otherwise
+        """
+        try:
+            if not self.client:
+                logger.error("Supabase client not initialized")
+                return None
+            
+            # Check if credential already exists
+            existing = self.client.table("user_credentials").select("id").eq("user_id", user_id).eq("app_type", app_type).execute()
+            
+            data = {
+                "user_id": user_id,
+                "app_name": app_name,
+                "app_type": app_type,
+                "credentials": credentials,  # Store encrypted in production
+                "metadata": metadata,
+                "is_active": True,
+                "updated_at": datetime.utcnow().isoformat()
+            }
+            
+            if existing.data:
+                # Update existing credential
+                credential_id = existing.data[0]["id"]
+                response = self.client.table("user_credentials").update(data).eq("id", credential_id).execute()
+                logger.info(f"Updated credentials for {app_name}: {credential_id}")
+            else:
+                # Insert new credential
+                data["created_at"] = datetime.utcnow().isoformat()
+                response = self.client.table("user_credentials").insert(data).execute()
+                credential_id = response.data[0]["id"] if response.data else None
+                logger.info(f"Stored new credentials for {app_name}: {credential_id}")
+            
+            # Also update user_connected_apps table for quick lookup
+            await self._update_connected_apps(user_id, app_name, app_type)
+            
+            return credential_id
+            
+        except Exception as e:
+            logger.error(f"Error storing user credentials: {str(e)}")
+            return None
