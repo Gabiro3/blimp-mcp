@@ -203,7 +203,7 @@ class ProxyService:
                     **credentials,
                     "access_token": new_access_token,
                     "refresh_token": new_refresh_token,
-                    "expires_at": expires_at,
+                    "expiry_date": expires_at,
                     "expires_in": expires_in
                 }
                 
