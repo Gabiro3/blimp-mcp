@@ -392,6 +392,8 @@ async def execute_workflow(request: ExecuteWorkflowRequest):
             logger.info(f"Executing step {i+1}/{len(function_calls)}: {app}.{function}")
             
             # Replace parameter references with stored results
+            print(parameters)
+            print(stored_results)
             parameters = _resolve_parameters(parameters, stored_results)
             
             try:
