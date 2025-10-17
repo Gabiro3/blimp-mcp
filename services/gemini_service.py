@@ -102,23 +102,43 @@ User request: {prompt}"""
     ) -> Dict[str, Any]:
         """
         Analyze user prompt and return function calls to execute.
+        This is the PRIMARY method for workflow execution - it generates the complete execution plan.
         
         Args:
             prompt: User's automation request
-            available_functions: Dict of available functions for required apps
+            available_functions: Dict of available functions for user's connected apps
             
         Returns:
-            Dictionary containing function calls to execute
+            Dictionary containing:
+            - workflow_type: "simple" or "complex"
+            - function_calls: Array of function calls to execute in sequence
+            - required_apps: List of apps needed for this workflow
+            - reasoning: Explanation of the workflow logic
         """
         try:
-            functions_description = "\n\nAVAILABLE FUNCTIONS:\n"
-            for app_name, functions in available_functions.items():
-                functions_description += f"\n{app_name.upper()} Functions:\n"
-                for func_name, func_info in functions.items():
-                    functions_description += f"""
+            if not prompt or prompt.strip() == "":
+                logger.error("Empty prompt provided to analyze_prompt_with_functions")
+                return {
+                    "workflow_type": "error",
+                    "function_calls": [],
+                    "required_apps": [],
+                    "reasoning": "No prompt provided. Please describe what you want to automate."
+                }
+            
+            functions_description = "\n\nAVAILABLE FUNCTIONS (based on user's connected apps):\n"
+            
+            if not available_functions:
+                logger.warning("No available functions provided - user may not have connected apps")
+                functions_description += "\nNOTE: User has no connected apps. Workflow cannot be executed.\n"
+            else:
+                for app_name, functions in available_functions.items():
+                    functions_description += f"\n{app_name.upper()} Functions:\n"
+                    for func_name, func_info in functions.items():
+                        functions_description += f"""
 - {func_name}:
   Description: {func_info['description']}
   Parameters: {json.dumps(func_info['parameters'], indent=4)}
+  Returns: {func_info.get('returns', 'Result object')}
 """
             
             system_prompt = f"""You are an AI assistant for an automation platform called Blimp.
@@ -126,11 +146,15 @@ Analyze the user's request and determine which function calls to make to fulfill
 
 {functions_description}
 
-TASK:
-Based on the user's request, return a JSON array of function calls to execute in sequence.
-For simple requests, return a single function call. For complex workflows, return multiple function calls with proper data flow.
+IMPORTANT RULES:
+1. ONLY use functions from the AVAILABLE FUNCTIONS list above
+2. If the user's request requires apps they haven't connected, return an error in reasoning
+3. Break complex requests into logical steps with clear data flow
+4. Use realistic parameter values based on the user's request
+5. For time-based parameters, use ISO 8601 format (e.g., "2025-01-20T10:00:00Z")
+6. ALWAYS generate at least one function call if the request is valid
 
-RESPONSE FORMAT (JSON only, no markdown):
+RESPONSE FORMAT (JSON only, no markdown, no code blocks):
 {{
   "workflow_type": "simple" | "complex",
   "function_calls": [
@@ -147,83 +171,47 @@ RESPONSE FORMAT (JSON only, no markdown):
     }},
     {{
       "step": 2,
-      "app": "gcalendar",
-      "function": "create_event",
+      "app": "slack",
+      "function": "post_message",
       "parameters": {{
-        "summary": "Meeting from {{{{ unread_emails[0].subject }}}}",
-        "start_time": "2025-01-20T10:00:00Z",
-        "end_time": "2025-01-20T11:00:00Z"
+        "channel": "#notifications",
+        "text": "You have {{{{ unread_emails.length }}}} unread emails"
       }},
       "use_results_from": ["unread_emails"],
-      "description": "Create calendar event from first email"
+      "description": "Send notification to Slack"
     }}
   ],
-  "required_apps": ["gmail", "gcalendar"],
-  "reasoning": "Brief explanation of the workflow logic"
+  "required_apps": ["gmail", "slack"],
+  "reasoning": "Fetch unread emails from Gmail and send count to Slack channel"
 }}
 
-GUIDELINES:
-- Set workflow_type to "simple" for single function calls, "complex" for multi-step workflows
-- Return function calls in the order they should be executed (use "step" field)
-- Use "store_result_as" to save results for later function calls
-- Use "use_results_from" to reference previous results
-- Use {{{{ variable_name }}}} syntax to reference stored results in parameters
-- Be specific with parameters - use actual values when possible
-- Include a brief "description" for each step
-- For complex workflows, break them into logical steps with clear data flow
-- Always include "required_apps" array with all apps used
+FIELD EXPLANATIONS:
+- workflow_type: "simple" for single action, "complex" for multi-step workflows
+- function_calls: Array of function calls in execution order
+  - step: Sequential number (1, 2, 3...)
+  - app: App name (must match available functions)
+  - function: Function name (must exist in that app's functions)
+  - parameters: Object with function parameters (use actual values from user's request)
+  - store_result_as: (optional) Variable name to store result for later use
+  - use_results_from: (optional) Array of variable names this step depends on
+  - description: Brief explanation of what this step does
+- required_apps: Array of all apps used in the workflow
+- reasoning: Brief explanation of the overall workflow logic
 
-EXAMPLES:
+PARAMETER REFERENCE SYNTAX:
+Use {{{{ variable_name }}}} to reference stored results in parameters.
+Examples:
+- {{{{ emails[0].subject }}}} - First email's subject
+- {{{{ user_data.email }}}} - User's email from stored data
+- {{{{ task_list.length }}}} - Number of items in task list
 
-Simple workflow (single action):
-{{
-  "workflow_type": "simple",
-  "function_calls": [
-    {{
-      "step": 1,
-      "app": "gmail",
-      "function": "send_email",
-      "parameters": {{
-        "to": "user@example.com",
-        "subject": "Hello",
-        "body": "Test email"
-      }},
-      "description": "Send email to user"
-    }}
-  ],
-  "required_apps": ["gmail"],
-  "reasoning": "Simple email send operation"
-}}
+===== USER REQUEST =====
+{prompt}
+========================
 
-Complex workflow (multi-step):
-{{
-  "workflow_type": "complex",
-  "function_calls": [
-    {{
-      "step": 1,
-      "app": "gmail",
-      "function": "list_messages",
-      "parameters": {{"query": "is:unread", "max_results": 5}},
-      "store_result_as": "emails",
-      "description": "Get unread emails"
-    }},
-    {{
-      "step": 2,
-      "app": "notion",
-      "function": "create_page",
-      "parameters": {{
-        "title": "Email Summary",
-        "content": "{{{{ emails }}}}"
-      }},
-      "use_results_from": ["emails"],
-      "description": "Create Notion page with email summary"
-    }}
-  ],
-  "required_apps": ["gmail", "notion"],
-  "reasoning": "Fetch emails and log them to Notion"
-}}
-
-User request: {prompt}"""
+Analyze the above user request and generate the appropriate function calls. Respond with ONLY the JSON object."""
+            
+            logger.info(f"Sending prompt to Gemini (length: {len(prompt)} chars)")
             
             response = self.model.generate_content(
                 system_prompt,
@@ -233,13 +221,13 @@ User request: {prompt}"""
             )
             
             response_text = response.text.strip()
-            logger.info(f"Raw Gemini response: {response_text[:500]}")
+            logger.info(f"Raw Gemini response (first 500 chars): {response_text[:500]}")
             
             parsed_response = self._extract_and_parse_json(response_text)
             
             parsed_response = self._validate_function_call_response(parsed_response)
             
-            logger.info(f"Gemini function call analysis complete: {len(parsed_response.get('function_calls', []))} steps")
+            logger.info(f"Gemini function call analysis complete: {len(parsed_response.get('function_calls', []))} steps generated")
             return parsed_response
             
         except Exception as e:
@@ -249,8 +237,50 @@ User request: {prompt}"""
                 "function_calls": [],
                 "required_apps": [],
                 "error": str(e),
-                "reasoning": "Error occurred during analysis"
+                "reasoning": f"Error occurred during analysis: {str(e)}"
             }
+
+    def _validate_function_call_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Validate and ensure response has all required fields for function call execution.
+        Adds missing fields with sensible defaults.
+        """
+        validated = {
+            "workflow_type": response.get("workflow_type", "simple"),
+            "function_calls": response.get("function_calls", []),
+            "required_apps": response.get("required_apps", []),
+            "reasoning": response.get("reasoning", "Workflow execution plan")
+        }
+        
+        if not validated["function_calls"]:
+            logger.warning("No function calls in response")
+            validated["reasoning"] = "No function calls generated. " + validated["reasoning"]
+        
+        for i, call in enumerate(validated["function_calls"]):
+            # Ensure step number
+            if "step" not in call:
+                call["step"] = i + 1
+            
+            # Validate required fields
+            if "app" not in call or "function" not in call:
+                logger.error(f"Function call {i+1} missing required 'app' or 'function' field: {call}")
+                call["app"] = call.get("app", "unknown")
+                call["function"] = call.get("function", "unknown")
+            
+            # Ensure parameters exist
+            if "parameters" not in call:
+                call["parameters"] = {}
+            
+            # Add description if missing
+            if "description" not in call:
+                call["description"] = f"Execute {call.get('function', 'unknown')} on {call.get('app', 'unknown')}"
+            
+            # Extract required app if not in list
+            app_name = call.get("app")
+            if app_name and app_name not in validated["required_apps"]:
+                validated["required_apps"].append(app_name)
+        
+        return validated
 
     def _extract_and_parse_json(self, text: str) -> Dict[str, Any]:
         """
