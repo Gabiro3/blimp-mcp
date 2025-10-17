@@ -462,103 +462,62 @@ async def execute_workflow(request: ExecuteWorkflowRequest):
             detail=f"Error executing workflow: {str(e)}"
         )
 def _resolve_parameters(parameters: Dict[str, Any], stored_results: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Resolve parameter references like {{ variable_name }} with stored results.
-    Supports nested access like {{ emails[0].subject }} and {{ user.name }}
-    """
     import re
 
-    print(parameters)
-    print(stored_results)
-    
     resolved = {}
+
     for key, value in parameters.items():
         if isinstance(value, str) and "{{" in value and "}}" in value:
-            # Extract variable references
             pattern = r'\{\{\s*([^}]+)\s*\}\}'
             matches = re.findall(pattern, value)
-            print(matches)
-            
+
             for match in matches:
                 try:
-                    # Handle nested access like unread_emails[0].subject
-                    parts = match.split('.')
+                    parts = re.split(r'\.|\[|\]', match)
+                    parts = [p for p in parts if p]  # remove empty strings
+
                     result = stored_results
-                    
                     for part in parts:
-                        if '[' in part and ']' in part:
-                            # Handle array access
-                            var_name = part.split('[')[0]
-                            index_str = part.split('[')[1].split(']')[0]
-                            index = int(index_str)
-                            
-                            # Get the variable
-                            result = result.get(var_name) if isinstance(result, dict) else result
-                            
-                            if result is None:
-                                logger.warning(f"Variable '{var_name}' not found in stored results")
-                                result = None
-                                break
-                            
-                            # Check if result is a list or dict
-                            if isinstance(result, list):
-                                if index < len(result):
-                                    result = result[index]
-                                else:
-                                    logger.warning(f"Index {index} out of range for list of length {len(result)}")
-                                    result = None
-                                    break
-                            elif isinstance(result, dict):
-                                # If it's a dict, try common list field names
-                                list_fields = ['data', 'items', 'results', 'emails', 'messages', 'events', 'files']
+                        if isinstance(result, dict):
+                            if part in result:
+                                result = result[part]
+                            else:
+                                # Try common list fields inside this dict
+                                list_keys = ['messages', 'items', 'data', 'results']
                                 found = False
-                                for field in list_fields:
-                                    if field in result and isinstance(result[field], list):
-                                        if index < len(result[field]):
-                                            result = result[field][index]
+                                for lk in list_keys:
+                                    if lk in result and isinstance(result[lk], list):
+                                        try:
+                                            index = int(part)
+                                            result = result[lk][index]
                                             found = True
                                             break
-                                        else:
-                                            logger.warning(f"Index {index} out of range for {field} list of length {len(result[field])}")
-                                            result = None
-                                            break
-                                
+                                        except (ValueError, IndexError):
+                                            continue
                                 if not found:
-                                    logger.error(f"Cannot access index {index} on dict. Available keys: {list(result.keys())}")
-                                    logger.error(f"Expected a list or dict with common list fields like 'data', 'items', etc.")
                                     result = None
                                     break
-                            else:
-                                logger.error(f"Cannot access index {index} on type {type(result).__name__}")
+                        elif isinstance(result, list):
+                            try:
+                                index = int(part)
+                                result = result[index]
+                            except (ValueError, IndexError):
                                 result = None
                                 break
                         else:
-                            # Simple property access
-                            if isinstance(result, dict):
-                                result = result.get(part)
-                            else:
-                                result = getattr(result, part, None)
-                            
-                            if result is None:
-                                logger.warning(f"Property '{part}' not found")
-                                break
-                    
-                    # Replace in value
+                            result = None
+                            break
+
                     if result is not None:
                         value = value.replace(f"{{{{ {match} }}}}", str(result))
-                    else:
-                        logger.warning(f"Could not resolve parameter reference: {match}")
-                        # Keep the original reference if we can't resolve it
-                        
+
                 except Exception as e:
                     logger.error(f"Error resolving parameter '{match}': {str(e)}")
-                    logger.exception(e)
-                    # Keep the original value if resolution fails
-            
+
             resolved[key] = value
         else:
             resolved[key] = value
-    
+
     return resolved
 
 
