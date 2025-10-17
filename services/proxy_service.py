@@ -257,18 +257,18 @@ class ProxyService:
     
     def _is_token_expired(self, credentials: Dict[str, Any]) -> bool:
         """
-        Check if the access token is expired based on expires_at timestamp
+        Check if the access token is expired based on expiry_date timestamp
         """
         try:
             # Check for expires_at in various locations
             expires_at = None
             
-            if "expires_at" in credentials:
-                expires_at = credentials["expires_at"]
+            if "expiry_date" in credentials:
+                expires_at = credentials["expiry_date"]
             elif "credentials" in credentials and isinstance(credentials["credentials"], dict):
-                expires_at = credentials["credentials"].get("expires_at")
+                expires_at = credentials["credentials"].get("expiry_date")
             elif "metadata" in credentials and isinstance(credentials["metadata"], dict):
-                expires_at = credentials["metadata"].get("expires_at")
+                expires_at = credentials["metadata"].get("expiry_date")
             
             if not expires_at:
                 # If no expiration info, assume token is valid
