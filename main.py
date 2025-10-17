@@ -327,7 +327,7 @@ async def execute_workflow(request: ExecuteWorkflowRequest):
             if workflow:
                 workflow_found = True
                 workflow_data = workflow
-                prompt = workflow.get("prompt", "")
+                prompt = workflow.get("description", "")
                 logger.info(f"Workflow {request.workflow_id} found in database")
             else:
                 logger.warning(f"Workflow {request.workflow_id} not found in database")
