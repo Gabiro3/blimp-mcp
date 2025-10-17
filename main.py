@@ -105,6 +105,7 @@ class ConnectAppResponse(BaseModel):
 class ProxyRequest(BaseModel):
     user_id: str
     payload: Dict[str, Any] = {}
+    body: Optional[Dict[str, Any]] = None
 
 
 class ProxyResponse(BaseModel):
@@ -422,17 +423,14 @@ async def proxy_app_request(
     """
     try:
         logger.info(f"Proxy request: {request} -> {app_name}/{action} for user: {request.user_id}")
+
         
         result = await proxy_service.proxy_request(
             user_id=request.user_id,
             app_name=app_name,
             action=action,
-            payload=request.payload
+            payload=request.body
         )
-        logger.info("------------------------")
-        logger.info(f"Proxy result: {result}")
-        logger.info(f"Proxy result: {result}")
-        logger.info(f"Proxy result: {result}")
         
         if result.get("success"):
             return ProxyResponse(

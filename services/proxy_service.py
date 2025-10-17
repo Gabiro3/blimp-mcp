@@ -640,22 +640,69 @@ class ProxyService:
             }
             
             if action == "createEvent":
-                events = payload
-                print(events)
+                logger.info(f"[v0] Raw payload type: {type(payload)}, content: {payload}")
+                
+                # Parse payload if it's a string
+                if isinstance(payload, str):
+                    try:
+                        payload = json.loads(payload)
+                        logger.info(f"[v0] Parsed stringified payload")
+                    except json.JSONDecodeError as e:
+                        logger.error(f"[v0] Failed to parse payload string: {e}")
+                        return {
+                            "success": False,
+                            "error": f"Invalid JSON payload: {str(e)}"
+                        }
+                
+                events = payload.get("events", [])
                 
                 # If no events array, check if this is a single event at the top level
                 if not events and payload.get("summary"):
                     events = [payload]
                 
+                parsed_events = []
+                for event in events:
+                    if isinstance(event, str):
+                        try:
+                            event = json.loads(event)
+                            logger.info(f"[v0] Parsed stringified event")
+                        except json.JSONDecodeError:
+                            logger.warning(f"[v0] Failed to parse event string, treating as single email")
+                            event = {}
+                    parsed_events.append(event)
+                
+                events = parsed_events
+                
                 calendar_id = payload.get("calendar_id", "primary")
                 
                 logger.info(f"[v0] Creating {len(events)} calendar events")
+                
+                if len(events) == 0:
+                    logger.warning(f"[v0] No valid events to create")
+                    return {
+                        "success": True,
+                        "message": "Created 0 events",
+                        "events": []
+                    }
                 
                 url = f"https://www.googleapis.com/calendar/v3/calendars/{calendar_id}/events"
                 
                 created_events = []
                 async with httpx.AsyncClient(timeout=self.timeout) as client:
                     for event_data in events:
+                        if not isinstance(event_data, dict):
+                            logger.error(f"[v0] Event data is not a dict: {type(event_data)}, value: {event_data}")
+                            continue
+                        
+                        attendees = event_data.get("attendees", [])
+                        if isinstance(attendees, str):
+                            try:
+                                attendees = json.loads(attendees)
+                                logger.info(f"[v0] Parsed stringified attendees")
+                            except json.JSONDecodeError:
+                                logger.warning(f"[v0] Failed to parse attendees string, treating as single email")
+                                attendees = [attendees] if attendees else []
+                        
                         calendar_event = {
                             "summary": event_data.get("summary", "No Title"),
                             "description": event_data.get("description", ""),
@@ -669,7 +716,6 @@ class ProxyService:
                             }
                         }
                         
-                        attendees = event_data.get("attendees", [])
                         if attendees:
                             calendar_event["attendees"] = [
                                 {"email": email} if isinstance(email, str) else email
