@@ -5,11 +5,14 @@ from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 import os
 import logging
+from dotenv import load_dotenv
 
 from services.gemini_service import GeminiService
 from services.supabase_service import SupabaseService
-from services.n8n_service import N8nService
 from services.proxy_service import ProxyService
+from helpers.function_registry import get_functions_for_apps
+
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -36,7 +39,6 @@ security = HTTPBearer()
 # Initialize services
 gemini_service = GeminiService()
 supabase_service = SupabaseService()
-n8n_service = N8nService()
 proxy_service = ProxyService()
 
 # Request/Response Models
@@ -60,17 +62,15 @@ class PromptResponse(BaseModel):
 
 
 class ExecuteWorkflowRequest(BaseModel):
-    workflow_id: str
     user_id: str
-    bearer_token: str
-    parameters: Optional[Dict[str, Any]] = None
+    prompt: str
 
 
 class ExecuteWorkflowResponse(BaseModel):
     status: str
     message: str
-    execution_id: Optional[str] = None
-    workflow_result: Optional[Dict[str, Any]] = None
+    results: List[Dict[str, Any]]
+    reasoning: Optional[str] = None
 
 
 class AppCredentials(BaseModel):
@@ -105,7 +105,6 @@ class ConnectAppResponse(BaseModel):
 class ProxyRequest(BaseModel):
     user_id: str
     payload: Dict[str, Any] = {}
-    body: Optional[Dict[str, Any]] = None
 
 
 class ProxyResponse(BaseModel):
@@ -145,8 +144,7 @@ async def health_check():
         "status": "healthy",
         "services": {
             "gemini": "operational",
-            "supabase": "operational",
-            "n8n": "operational"
+            "supabase": "operational"
         }
     }
 
@@ -165,13 +163,10 @@ async def process_prompt(request: PromptRequest):
     """
     try:
         logger.info(f"Processing prompt for user: {request.user_id}")
-        logger.info("Fetching all workflow templates from Supabase")
-        templates = await supabase_service.get_all_workflow_templates()
-        print(templates)
         
         # Step 1: Send prompt to Gemini for analysis
         logger.info("Sending prompt to Gemini 2.5 Flash")
-        gemini_response = await gemini_service.analyze_prompt(request.prompt, templates)
+        gemini_response = await gemini_service.analyze_prompt(request.prompt)
         
         if not gemini_response:
             raise HTTPException(
@@ -270,7 +265,7 @@ async def connect_app(request: ConnectAppRequest):
         
         # Step 3: Create/update n8n credentials for this user
         logger.info(f"Creating n8n credentials for user {request.user_id}")
-        n8n_credential_id = await n8n_service.create_user_credential(
+        n8n_credential_id = await proxy_service.create_user_credential(
             user_id=request.user_id,
             app_type=request.app_type,
             credentials=request.credentials.dict(),
@@ -305,69 +300,129 @@ async def connect_app(request: ConnectAppRequest):
 @app.post("/execute-workflow", response_model=ExecuteWorkflowResponse)
 async def execute_workflow(request: ExecuteWorkflowRequest):
     """
-    Execute n8n workflow via webhook with user-specific credentials
+    Execute workflow by analyzing prompt with Gemini and calling helper functions directly.
+    No n8n dependency - everything runs in the MCP server.
     
     Flow:
-    1. Fetch workflow webhook URL from database
-    2. Retrieve user's credentials from Supabase
-    3. Trigger n8n workflow via webhook GET request
-    4. Save workflow execution to Supabase
-    5. Return execution status
+    1. Analyze prompt to get required apps
+    2. Get available functions for those apps
+    3. Have Gemini generate function calls
+    4. Execute function calls in sequence
+    5. Return results
     """
     try:
-        logger.info(f"Executing workflow {request.workflow_id} for user: {request.user_id}")
+        logger.info(f"Executing workflow for user: {request.user_id}")
         
-        logger.info(f"Fetching webhook URL for workflow: {request.workflow_id}")
-        webhook_url = await supabase_service.get_workflow_webhook_url(request.workflow_id)
+        logger.info("Analyzing prompt with Gemini")
+        initial_analysis = await gemini_service.analyze_prompt(request.prompt)
+        required_apps = initial_analysis.get("required_apps", [])
         
-        if not webhook_url:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Webhook URL not found for workflow: {request.workflow_id}"
-            )
+        logger.info(f"Required apps: {required_apps}")
         
-        logger.info(f"Triggering n8n workflow via webhook: {webhook_url}")
-        execution_result = await n8n_service.trigger_workflow_webhook(
-            webhook_url=webhook_url,
-            user_id=request.user_id,
-            parameters=request.parameters or {}
+        available_functions = get_functions_for_apps(required_apps)
+        
+        logger.info("Generating function calls with Gemini")
+        function_plan = await gemini_service.analyze_prompt_with_functions(
+            request.prompt,
+            available_functions
         )
         
-        if not execution_result.get("success"):
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to execute n8n workflow: {execution_result.get('error')}"
+        function_calls = function_plan.get("function_calls", [])
+        reasoning = function_plan.get("reasoning", "")
+        
+        if not function_calls:
+            return ExecuteWorkflowResponse(
+                status="error",
+                message="No function calls generated",
+                results=[],
+                reasoning=reasoning
             )
         
-        execution_id = execution_result.get("execution_id")
+        logger.info(f"Executing {len(function_calls)} function calls")
         
-        # Step 3: Save workflow execution to Supabase
-        logger.info(f"Saving workflow execution to database: {execution_id}")
-        await supabase_service.save_workflow_execution(
-            user_id=request.user_id,
-            workflow_id=request.workflow_id,
-            execution_id=execution_id,
-            status="running",
-            parameters=request.parameters
-        )
+        results = []
+        stored_results = {}
         
-        logger.info(f"Workflow execution initiated successfully: {execution_id}")
+        for i, call in enumerate(function_calls):
+            app = call.get("app")
+            function = call.get("function")
+            parameters = call.get("parameters", {})
+            store_as = call.get("store_result_as")
+            
+            logger.info(f"Executing call {i+1}/{len(function_calls)}: {app}.{function}")
+            
+            # Replace parameter references with stored results
+            parameters = _resolve_parameters(parameters, stored_results)
+            
+            # Execute function
+            result = await proxy_service.execute_function_call(
+                user_id=request.user_id,
+                app_name=app,
+                function_name=function,
+                parameters=parameters
+            )
+            
+            results.append({
+                "call": f"{app}.{function}",
+                "result": result
+            })
+            
+            # Store result if needed
+            if store_as:
+                stored_results[store_as] = result
+        
+        logger.info(f"Workflow execution complete with {len(results)} results")
         
         return ExecuteWorkflowResponse(
             status="success",
-            message="Workflow execution initiated successfully",
-            execution_id=execution_id,
-            workflow_result=execution_result
+            message=f"Executed {len(results)} function calls successfully",
+            results=results,
+            reasoning=reasoning
         )
         
-    except HTTPException:
-        raise
     except Exception as e:
         logger.error(f"Error executing workflow: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error executing workflow: {str(e)}"
         )
+
+
+def _resolve_parameters(parameters: Dict[str, Any], stored_results: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Resolve parameter references like {{ variable_name }} with stored results.
+    """
+    import re
+    
+    resolved = {}
+    for key, value in parameters.items():
+        if isinstance(value, str) and "{{" in value and "}}" in value:
+            # Extract variable references
+            pattern = r'\{\{\s*([^}]+)\s*\}\}'
+            matches = re.findall(pattern, value)
+            
+            for match in matches:
+                # Handle nested access like unread_emails[0].subject
+                parts = match.split('.')
+                result = stored_results
+                
+                for part in parts:
+                    if '[' in part and ']' in part:
+                        # Handle array access
+                        var_name = part.split('[')[0]
+                        index = int(part.split('[')[1].split(']')[0])
+                        result = result.get(var_name, [])[index]
+                    else:
+                        result = result.get(part, {})
+                
+                # Replace in value
+                value = value.replace(f"{{{{ {match} }}}}", str(result))
+            
+            resolved[key] = value
+        else:
+            resolved[key] = value
+    
+    return resolved
 
 
 @app.get("/workflow/{workflow_id}/status")
@@ -377,7 +432,7 @@ async def get_workflow_status(workflow_id: str, user_id: str):
         logger.info(f"Fetching workflow status: {workflow_id}")
         
         # Get status from n8n
-        n8n_status = await n8n_service.get_execution_status(workflow_id)
+        n8n_status = await proxy_service.get_execution_status(workflow_id)
         
         # Get saved execution from Supabase
         db_execution = await supabase_service.get_workflow_execution(workflow_id, user_id)
@@ -422,14 +477,23 @@ async def proxy_app_request(
     - gdrive: listFiles, uploadFile
     """
     try:
-        logger.info(f"Proxy request: {request} -> {app_name}/{action} for user: {request.user_id}")
-
+        logger.info(f"[DEBUG] Received proxy request - app_name: '{app_name}', action: '{action}'")
+        logger.info(f"[DEBUG] Request body - user_id: '{request.user_id}', payload: {request.payload}")
+        
+        if not request.user_id or request.user_id.strip() == "":
+            logger.error(f"[ERROR] user_id is missing from request body!")
+            return ProxyResponse(
+                success=False,
+                error="user_id is required in request body"
+            )
+        
+        logger.info(f"Proxy request: {app_name}/{action} for user: {request.user_id}")
         
         result = await proxy_service.proxy_request(
             user_id=request.user_id,
             app_name=app_name,
             action=action,
-            payload=request.body
+            payload=request.payload
         )
         
         if result.get("success"):
@@ -445,11 +509,11 @@ async def proxy_app_request(
             
     except Exception as e:
         logger.error(f"Error in proxy request: {str(e)}")
+        logger.exception(e)  # Add full exception traceback
         return ProxyResponse(
             success=False,
             error=str(e)
         )
-
 
 if __name__ == "__main__":
     import uvicorn

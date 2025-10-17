@@ -1,8 +1,28 @@
+# Core FastAPI dependencies
 fastapi==0.115.0
 uvicorn[standard]==0.32.0
 pydantic==2.9.0
 python-dotenv==1.0.1
 httpx==0.27.0
-supabase==2.9.0
-google-generativeai==0.8.3
 python-multipart==0.0.12
+
+# Database
+supabase==2.9.0
+
+# AI/ML
+google-generativeai==0.8.3
+
+# Google APIs (Gmail, Calendar, Drive)
+google-api-python-client==2.147.0
+google-auth==2.35.0
+google-auth-oauthlib==1.2.1
+google-auth-httplib2==0.2.0
+
+# Notion SDK
+notion-client==2.2.1
+
+# Slack SDK
+slack-sdk==3.33.1
+
+# Discord (using httpx for API calls)
+# No additional package needed - using httpx
