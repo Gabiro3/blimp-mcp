@@ -310,3 +310,50 @@ User request: {prompt}"""
                 call["description"] = f"Execute {call.get('function', 'unknown')} on {call.get('app', 'unknown')}"
         
         return validated
+    
+    def _validate_workflow_response(self, response: Dict[str, Any], original_prompt: str) -> Dict[str, Any]:
+        """
+        Validate and ensure response has all required fields based on match_type
+        """
+        match_type = response.get("match_type", "error")
+        
+        if match_type == "existing_template":
+            return {
+                "match_type": "existing_template",
+                "workflow_id": response.get("workflow_id"),
+                "required_apps": response.get("required_apps", []),
+                "confidence": response.get("confidence", 0.8),
+                "reasoning": response.get("reasoning", "Template matched")
+            }
+        elif match_type == "custom_workflow":
+            return {
+                "match_type": "custom_workflow",
+                "workflow_json": response.get("workflow_json", {}),
+                "required_apps": response.get("required_apps", []),
+                "reasoning": response.get("reasoning", "Custom workflow generated")
+            }
+        else:
+            # Fallback for old format or errors
+            return {
+                "match_type": "error",
+                "required_apps": response.get("required_apps", []),
+                "error": response.get("error", "Unknown response format"),
+                "reasoning": response.get("reasoning", "Could not determine workflow type")
+            }
+    def _extract_apps_from_text(self, text: str) -> List[str]:
+        """Extract app names from text as fallback"""
+        common_apps = [
+            "Gmail", "Slack", "Google Sheets", "Google Drive", "Trello",
+            "Asana", "Notion", "Discord", "Twitter", "LinkedIn", "Salesforce",
+            "HubSpot", "Mailchimp", "Stripe", "PayPal", "Zoom", "Google Calendar",
+            "Dropbox", "GitHub", "Jira", "Airtable", "Zapier", "Monday.com"
+        ]
+        
+        found_apps = []
+        text_lower = text.lower()
+        
+        for app in common_apps:
+            if app.lower() in text_lower:
+                found_apps.append(app)
+        
+        return list(set(found_apps))
