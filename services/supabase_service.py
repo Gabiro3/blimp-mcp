@@ -429,3 +429,28 @@ class SupabaseService:
         except Exception as e:
             logger.error(f"Error updating user credentials: {str(e)}")
             return False
+    
+    async def get_all_workflow_templates(self) -> List[Dict[str, Any]]:
+        """
+        Get all active workflow templates from the database
+        
+        Returns:
+            List of workflow template dictionaries with id, name, description, and required_apps
+        """
+        try:
+            if not self.client:
+                logger.error("Supabase client not initialized")
+                return []
+            
+            response = self.client.table("workflow_templates").select("id, name, description, required_apps, category").eq("is_active", True).execute()
+            
+            if response.data:
+                logger.info(f"Retrieved {len(response.data)} workflow templates")
+                return response.data
+            
+            logger.info("No workflow templates found")
+            return []
+            
+        except Exception as e:
+            logger.error(f"Error fetching workflow templates: {str(e)}")
+            return []

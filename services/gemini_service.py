@@ -2,11 +2,10 @@ import os
 import json
 import logging
 import re
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 import google.generativeai as genai
 
 logger = logging.getLogger(__name__)
-
 
 class GeminiService:
     """Service for interacting with Gemini 2.5 Flash API"""
@@ -19,64 +18,137 @@ class GeminiService:
             genai.configure(api_key=self.api_key)
             self.model = genai.GenerativeModel('gemini-2.0-flash-exp')
     
-    async def analyze_prompt(self, prompt: str) -> Dict[str, Any]:
+    async def analyze_prompt(
+        self, 
+        prompt: str,
+        workflow_templates: Optional[List[Dict[str, Any]]] = None
+    ) -> Dict[str, Any]:
         """
-        Send prompt to Gemini and analyze what apps are needed
+        Send prompt to Gemini and analyze what apps are needed.
+        Returns either a matching workflow_id or generates a custom workflow JSON.
         
         Args:
             prompt: User's automation request
+            workflow_templates: List of available workflow templates from database
             
         Returns:
-            Dictionary containing required apps and workflow information
+            Dictionary containing either workflow_id (for existing templates) or workflow_json (for custom workflows)
         """
         try:
-            system_prompt = """You are an AI assistant for an automation platform called Blimp. 
-Analyze the user's request and determine what apps/services are needed.
+            templates_section = ""
+            if workflow_templates and len(workflow_templates) > 0:
+                templates_section = "\n\nAVAILABLE WORKFLOW TEMPLATES:\n"
+                for template in workflow_templates:
+                    templates_section += f"""
+- ID: {template['id']}
+  Name: {template['name']}
+  Description: {template['description']}
+  Required Apps: {', '.join(template['required_apps'])}
+  Category: {template.get('category', 'general')}
+"""
+            
+            workflow_example = """{
+  "name": "Workflow Name",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "webhook-path",
+        "responseMode": "lastNode"
+      },
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "{{ $env.MCP_SERVER_URL }}/proxy/app/action"
+      },
+      "name": "API Call Node",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [460, 300]
+    }
+  ],
+  "connections": {
+    "Webhook Trigger": {
+      "main": [[{"node": "API Call Node", "type": "main", "index": 0}]]
+    }
+  }
+}"""
+            
+            system_prompt = f"""You are an AI assistant for an automation platform called Blimp. 
+Analyze the user's request and determine the best workflow solution.
+
+{templates_section}
+
+TASK:
+1. If the user's request matches one of the available workflow templates above, return the workflow_id
+2. If the request is more complex or doesn't match existing templates, generate a custom n8n workflow JSON
 
 IMPORTANT: Respond ONLY with valid JSON. No markdown, no explanations, just the JSON object.
 
-Required JSON structure:
-{
+RESPONSE FORMAT:
+
+For matching existing template:
+{{
+  "match_type": "existing_template",
+  "workflow_id": "template-id-here",
   "required_apps": ["app1", "app2"],
-  "workflow_type": "description of workflow type",
-  "workflow_id": "suggested_workflow_id",
-  "workflow_description": "detailed description of what this workflow does",
-  "suggested_actions": ["action1", "action2"]
-}
+  "confidence": 0.95,
+  "reasoning": "Brief explanation of why this template matches"
+}}
 
-Common apps to consider: Gmail, Slack, Google Sheets, Google Drive, Trello, Asana, Notion, Discord, Twitter, LinkedIn, Salesforce, HubSpot, Mailchimp, Stripe, PayPal, Zoom, Google Calendar, Dropbox, GitHub, Jira.
+For custom workflow (complex requests):
+{{
+  "match_type": "custom_workflow",
+  "workflow_json": {{
+    "name": "Workflow Name",
+    "description": "What this workflow does",
+    "required_apps": ["app1", "app2"],
+    "nodes": [...],
+    "connections": {{...}}
+  }},
+  "required_apps": ["app1", "app2"],
+  "reasoning": "Brief explanation of the workflow design"
+}}
 
-User request: """ + prompt
+N8N WORKFLOW STRUCTURE EXAMPLE:
+{workflow_example}
+
+GUIDELINES:
+- Use match_type "existing_template" if confidence > 0.7 that a template matches
+- Use match_type "custom_workflow" for complex multi-step automations
+- For custom workflows, include proper n8n node structure with webhook triggers
+- Common apps: Gmail, Slack, Google Sheets, Google Drive, Trello, Asana, Notion, Discord, Twitter, LinkedIn, Salesforce, HubSpot, Mailchimp, Stripe, PayPal, Zoom, Google Calendar, Dropbox, GitHub, Jira
+- Ensure all nodes have proper connections and parameters
+
+User request: {prompt}"""
             
             response = self.model.generate_content(
                 system_prompt,
                 generation_config=genai.types.GenerationConfig(
-                    temperature=0.3,  # Lower temperature for more consistent JSON
+                    temperature=0.3,
                 )
             )
             
-            # Get the response text
             response_text = response.text.strip()
             
-            logger.info(f"Raw Gemini response: {response_text[:500]}")  # Log first 500 chars
+            logger.info(f"Raw Gemini response: {response_text[:500]}")
             
             parsed_response = self._extract_and_parse_json(response_text)
             
-            parsed_response = self._validate_response(parsed_response, prompt)
+            parsed_response = self._validate_workflow_response(parsed_response, prompt)
             
-            logger.info(f"Gemini analysis complete: {json.dumps(parsed_response, indent=2)}")
+            logger.info(f"Gemini analysis complete: {json.dumps(parsed_response, indent=2)[:500]}")
             return parsed_response
             
         except Exception as e:
             logger.error(f"Error calling Gemini API: {str(e)}", exc_info=True)
-            # Return a fallback response
             return {
+                "match_type": "error",
                 "required_apps": [],
-                "workflow_type": "unknown",
-                "workflow_id": None,
-                "workflow_description": f"Error analyzing prompt with Gemini",
-                "suggested_actions": [],
-                "error": str(e)
+                "error": str(e),
+                "reasoning": "Error occurred during analysis"
             }
     
     def _extract_and_parse_json(self, text: str) -> Dict[str, Any]:
@@ -108,12 +180,41 @@ User request: """ + prompt
         
         logger.warning("All JSON parsing strategies failed, using text extraction fallback")
         return {
+            "match_type": "error",
             "required_apps": self._extract_apps_from_text(text),
-            "workflow_type": "general_automation",
-            "workflow_id": f"workflow_{abs(hash(text)) % 10000}",
-            "workflow_description": text[:500],  # Limit description length
-            "suggested_actions": []
+            "error": "Failed to parse JSON response",
+            "reasoning": text[:500]
         }
+    
+    def _validate_workflow_response(self, response: Dict[str, Any], original_prompt: str) -> Dict[str, Any]:
+        """
+        Validate and ensure response has all required fields based on match_type
+        """
+        match_type = response.get("match_type", "error")
+        
+        if match_type == "existing_template":
+            return {
+                "match_type": "existing_template",
+                "workflow_id": response.get("workflow_id"),
+                "required_apps": response.get("required_apps", []),
+                "confidence": response.get("confidence", 0.8),
+                "reasoning": response.get("reasoning", "Template matched")
+            }
+        elif match_type == "custom_workflow":
+            return {
+                "match_type": "custom_workflow",
+                "workflow_json": response.get("workflow_json", {}),
+                "required_apps": response.get("required_apps", []),
+                "reasoning": response.get("reasoning", "Custom workflow generated")
+            }
+        else:
+            # Fallback for old format or errors
+            return {
+                "match_type": "error",
+                "required_apps": response.get("required_apps", []),
+                "error": response.get("error", "Unknown response format"),
+                "reasoning": response.get("reasoning", "Could not determine workflow type")
+            }
     
     def _validate_response(self, response: Dict[str, Any], original_prompt: str) -> Dict[str, Any]:
         """
@@ -151,4 +252,4 @@ User request: """ + prompt
             if app.lower() in text_lower:
                 found_apps.append(app)
         
-        return list(set(found_apps))  # Remove duplicates
+        return list(set(found_apps))
