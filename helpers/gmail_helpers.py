@@ -104,7 +104,7 @@ class GmailHelpers:
             }
             
         except HttpError as error:
-            logger.error(f"Gmail API error getting message: {error}")
+            logger.error(f"Gmail API error getting message: {message} {error}")
             return {
                 "success": False,
                 "error": str(error)
