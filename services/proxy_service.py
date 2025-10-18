@@ -45,9 +45,12 @@ class ProxyService:
         try:
             logger.info(f"Executing {app_name}.{function_name} for user: {user_id}")
             
+            normalized_app_name = self._normalize_app_name(app_name)
+            logger.info(f"Normalized app name from '{app_name}' to '{normalized_app_name}'")
+            
             credentials = await self.supabase_service.get_user_app_credentials(
                 user_id=user_id,
-                app_name=app_name
+                app_name=normalized_app_name
             )
             
             if not credentials:
@@ -58,7 +61,7 @@ class ProxyService:
             
             if self._is_token_expired(credentials):
                 logger.info(f"Token expired, refreshing for {app_name}")
-                refresh_result = await self._refresh_access_token(user_id, app_name, credentials)
+                refresh_result = await self._refresh_access_token(user_id, normalized_app_name, credentials)
                 
                 if not refresh_result["success"]:
                     return {
@@ -76,15 +79,15 @@ class ProxyService:
                     "error": f"Invalid credentials for {app_name}"
                 }
             
-            if app_name == "gmail":
+            if normalized_app_name == "gmail":
                 return await self._execute_gmail_function(access_token, function_name, parameters)
-            elif app_name == "gcalendar":
+            elif normalized_app_name in ["calendar", "gcalendar"]:
                 return await self._execute_gcalendar_function(access_token, function_name, parameters)
-            elif app_name == "notion":
+            elif normalized_app_name == "notion":
                 return await self._execute_notion_function(access_token, function_name, parameters)
-            elif app_name == "slack":
+            elif normalized_app_name == "slack":
                 return await self._execute_slack_function(access_token, function_name, parameters)
-            elif app_name == "discord":
+            elif normalized_app_name == "discord":
                 return await self._execute_discord_function(access_token, function_name, parameters)
             else:
                 return {
@@ -99,6 +102,94 @@ class ProxyService:
                 "error": str(e)
             }
     
+    async def execute_function_call_with_credentials(
+        self,
+        user_id: str,
+        app_name: str,
+        function_name: str,
+        parameters: Dict[str, Any],
+        cached_credentials: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        Execute a single function call using helper functions with optional cached credentials.
+        This method avoids redundant credential fetches when credentials are already available.
+        
+        Args:
+            user_id: User's unique identifier
+            app_name: Name of the app (gmail, gcalendar, etc.)
+            function_name: Name of the function to call
+            parameters: Function parameters
+            cached_credentials: Optional pre-fetched credentials to avoid DB lookup
+            
+        Returns:
+            Dict with function execution result
+        """
+        try:
+            logger.info(f"Executing {app_name}.{function_name} for user: {user_id}")
+            
+            normalized_app_name = self._normalize_app_name(app_name)
+            logger.info(f"Normalized app name from '{app_name}' to '{normalized_app_name}'")
+            
+            # Use cached credentials if available, otherwise fetch from DB
+            if cached_credentials:
+                logger.info(f"Using cached credentials for {normalized_app_name}")
+                credentials = cached_credentials
+            else:
+                logger.info(f"Fetching credentials from DB for {normalized_app_name}")
+                credentials = await self.supabase_service.get_user_app_credentials(
+                    user_id=user_id,
+                    app_name=normalized_app_name
+                )
+            
+            if not credentials:
+                return {
+                    "success": False,
+                    "error": f"No credentials found for {app_name}. Please connect your account first."
+                }
+            
+            if self._is_token_expired(credentials):
+                logger.info(f"Token expired, refreshing for {app_name}")
+                refresh_result = await self._refresh_access_token(user_id, normalized_app_name, credentials)
+                
+                if not refresh_result["success"]:
+                    return {
+                        "success": False,
+                        "error": refresh_result.get("error", "Failed to refresh token")
+                    }
+                
+                credentials = refresh_result["credentials"]
+            
+            access_token = self._extract_access_token(credentials)
+            
+            if not access_token:
+                return {
+                    "success": False,
+                    "error": f"Invalid credentials for {app_name}"
+                }
+            
+            if normalized_app_name == "gmail":
+                return await self._execute_gmail_function(access_token, function_name, parameters)
+            elif normalized_app_name in ["calendar", "gcalendar"]:
+                return await self._execute_gcalendar_function(access_token, function_name, parameters)
+            elif normalized_app_name == "notion":
+                return await self._execute_notion_function(access_token, function_name, parameters)
+            elif normalized_app_name == "slack":
+                return await self._execute_slack_function(access_token, function_name, parameters)
+            elif normalized_app_name == "discord":
+                return await self._execute_discord_function(access_token, function_name, parameters)
+            else:
+                return {
+                    "success": False,
+                    "error": f"Unsupported app: {app_name}"
+                }
+                
+        except Exception as e:
+            logger.error(f"Error executing function call: {str(e)}", exc_info=True)
+            return {
+                "success": False,
+                "error": str(e)
+            }
+    
     async def _execute_gmail_function(
         self,
         access_token: str,
@@ -108,14 +199,10 @@ class ProxyService:
         """Execute Gmail helper function."""
         try:
             if function_name == "list_messages":
-                print(parameters)
-                logger.info(f"Parameters for list_messages: {parameters}")
                 return await self.gmail_helpers.list_messages(access_token, **parameters)
             elif function_name == "get_message":
-                logger.info(f"Parameters for get_message: {parameters}")
                 return await self.gmail_helpers.get_message(access_token, **parameters)
             elif function_name == "send_message":
-                logger.info(f"Parameters for send_message: {parameters}")
                 return await self.gmail_helpers.send_message(access_token, **parameters)
             elif function_name == "delete_message":
                 return await self.gmail_helpers.delete_message(access_token, **parameters)
@@ -370,7 +457,7 @@ class ProxyService:
                 expires_at = credentials["credentials"].get("expiry_date")
             elif "metadata" in credentials and isinstance(credentials["metadata"], dict):
                 expires_at = credentials["metadata"].get("expiry_date")
-            
+
             if not expires_at:
                 logger.warning("No expiration info found in credentials, assuming token is valid")
                 return False
@@ -398,3 +485,44 @@ class ProxyService:
         except Exception as e:
             logger.warning(f"Error checking token expiration: {str(e)}")
             return True
+    
+    def _normalize_app_name(self, app_name: str) -> str:
+        """
+        Normalize app names to match database app_type values.
+        Handles variations like "google calendar" -> "calendar"
+        
+        Args:
+            app_name: App name from function call (e.g., "google calendar", "Google Gmail")
+            
+        Returns:
+            Normalized app_type for database query (e.g., "calendar", "gmail")
+        """
+        # Convert to lowercase first
+        normalized = app_name.lower().strip()
+        
+        # Map common variations to database app_type values
+        app_name_mapping = {
+            "google calendar": "calendar",
+            "google gmail": "gmail",
+            "gmail": "gmail",
+            "calendar": "calendar",
+            "gcalendar": "calendar",
+            "google drive": "drive",
+            "gdrive": "drive",
+            "drive": "drive",
+            "google sheets": "sheets",
+            "gsheets": "sheets",
+            "sheets": "sheets",
+            "google docs": "docs",
+            "gdocs": "docs",
+            "docs": "docs",
+            "slack": "slack",
+            "notion": "notion",
+            "discord": "discord",
+            "trello": "trello",
+            "asana": "asana",
+            "linear": "linear",
+        }
+        
+        # Return mapped value or original normalized name
+        return app_name_mapping.get(normalized, normalized)

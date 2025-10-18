@@ -275,8 +275,7 @@ async def connect_app(request: ConnectAppRequest):
             app_type=request.app_type,
             credentials=request.credentials.dict(),
             metadata={}  # Adjust this based on what metadata needs to be stored
-  )
-
+        )
         
         if not n8n_credential_id:
             logger.warning(f"Failed to create n8n credential, but Supabase storage succeeded")
@@ -313,8 +312,9 @@ async def execute_workflow(request: ExecuteWorkflowRequest):
     1. If workflow_id provided, fetch workflow from database
     2. If workflow found in DB, use its stored structure
     3. If not found or no workflow_id, analyze prompt with Gemini to get function calls
-    4. Execute function calls in sequence
-    5. Save workflow to user_workflows if it was newly generated
+    4. Fetch credentials once per app (optimization)
+    5. Execute function calls in sequence with proper error handling
+    6. Save workflow to user_workflows if it was newly generated
     """
     try:
         logger.info(f"Executing workflow for user: {request.user_id}")
@@ -329,33 +329,28 @@ async def execute_workflow(request: ExecuteWorkflowRequest):
             if workflow:
                 workflow_found = True
                 workflow_data = workflow
-                prompt = workflow.get("description", "")
+                prompt = workflow.get("prompt") or workflow.get("description") or workflow.get("name", "")
                 logger.info(f"Workflow {request.workflow_id} found in database")
             else:
                 logger.warning(f"Workflow {request.workflow_id} not found in database")
         
-        # If no workflow found and no prompt provided, error
-        if not workflow_found and not request.prompt:
+        if request.prompt:
+            prompt = request.prompt
+            logger.info("Using prompt from request")
+        
+        if not prompt or prompt.strip() == "":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Either workflow_id must exist in database or prompt must be provided"
             )
         
-        # Use provided prompt if workflow not found
-        if not workflow_found:
-            prompt = request.prompt
-            logger.info("Using provided prompt for workflow generation")
+        logger.info(f"Analyzing prompt and generating function calls with Gemini. Prompt: '{prompt[:100]}...'")
         
-        logger.info("Analyzing prompt and generating function calls with Gemini")
-        
-        # Get connected apps for this user to determine available functions
         connected_apps = await supabase_service.get_user_connected_apps(request.user_id)
         logger.info(f"User has {len(connected_apps)} connected apps: {connected_apps}")
         
-        # Get available functions for connected apps
         available_functions = get_functions_for_apps(connected_apps)
         
-        # Single call to Gemini to get the complete execution plan
         function_plan = await gemini_service.analyze_prompt_with_functions(
             prompt,
             available_functions
@@ -375,6 +370,21 @@ async def execute_workflow(request: ExecuteWorkflowRequest):
         
         logger.info(f"Generated {len(function_calls)} function calls to execute")
         
+        app_credentials_cache = {}
+        for app in required_apps:
+            try:
+                credentials = await supabase_service.get_user_app_credentials(
+                    user_id=request.user_id,
+                    app_name=app
+                )
+                if credentials:
+                    app_credentials_cache[app] = credentials
+                    logger.info(f"Cached credentials for {app}")
+                else:
+                    logger.warning(f"No credentials found for {app}")
+            except Exception as e:
+                logger.error(f"Error fetching credentials for {app}: {str(e)}")
+        
         results = []
         stored_results = {}
         
@@ -383,54 +393,59 @@ async def execute_workflow(request: ExecuteWorkflowRequest):
             function = call.get("function")
             parameters = call.get("parameters", {})
             
-            # Merge request parameters if provided
             if request.parameters:
                 parameters = {**parameters, **request.parameters}
             
             store_as = call.get("store_result_as")
             
             logger.info(f"Executing step {i+1}/{len(function_calls)}: {app}.{function}")
+            logger.info(f"Parameters before resolution: {parameters}")
             
-            # Replace parameter references with stored results
-            print(parameters)
-            print(stored_results)
             parameters = _resolve_parameters(parameters, stored_results)
+            logger.info(f"Parameters after resolution: {parameters}")
             
             try:
-                # Execute function
-                result = await proxy_service.execute_function_call(
+                result = await proxy_service.execute_function_call_with_credentials(
                     user_id=request.user_id,
                     app_name=app,
                     function_name=function,
-                    parameters=parameters
+                    parameters=parameters,
+                    cached_credentials=app_credentials_cache.get(app)
                 )
                 
-                results.append({
-                    "step": i + 1,
-                    "call": f"{app}.{function}",
-                    "status": "success",
-                    "result": result
-                })
-                
-                # Store result if needed for next steps
-                if store_as:
-                    stored_results[store_as] = result
-                    logger.info(f"Stored result as '{store_as}' for future steps")
+                if result.get("success", False):
+                    results.append({
+                        "step": i + 1,
+                        "call": f"{app}.{function}",
+                        "status": "success",
+                        "result": result
+                    })
+                    
+                    if store_as:
+                        stored_results[store_as] = result
+                        logger.info(f"Stored result as '{store_as}': {result}")
+                else:
+                    error_msg = result.get("error", "Unknown error")
+                    logger.error(f"Function returned error: {error_msg}")
+                    results.append({
+                        "step": i + 1,
+                        "call": f"{app}.{function}",
+                        "status": "error",
+                        "error": error_msg
+                    })
                     
             except Exception as e:
-                logger.error(f"Error executing {app}.{function}: {str(e)}")
+                logger.error(f"Error executing {app}.{function}: {str(e)}", exc_info=True)
                 results.append({
                     "step": i + 1,
                     "call": f"{app}.{function}",
                     "status": "error",
                     "error": str(e)
                 })
-                # Continue with remaining steps even if one fails
         
         if not workflow_found and request.workflow_id:
             logger.info(f"Saving newly generated workflow {request.workflow_id} to user_workflows")
             
-            # Generate workflow name from prompt
             workflow_name = prompt[:50] + "..." if len(prompt) > 50 else prompt
             workflow_description = f"Custom workflow: {prompt[:200]}"
             
@@ -445,7 +460,6 @@ async def execute_workflow(request: ExecuteWorkflowRequest):
             )
             logger.info("Workflow saved successfully for future reuse")
         
-        # Count successful executions
         successful_steps = sum(1 for r in results if r.get("status") == "success")
         
         logger.info(f"Workflow execution complete: {successful_steps}/{len(results)} steps successful")
@@ -465,65 +479,6 @@ async def execute_workflow(request: ExecuteWorkflowRequest):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error executing workflow: {str(e)}"
         )
-def _resolve_parameters(parameters: Dict[str, Any], stored_results: Dict[str, Any]) -> Dict[str, Any]:
-    import re
-
-    resolved = {}
-    print(parameters)
-
-    for key, value in parameters.items():
-        if isinstance(value, str) and "{{" in value and "}}" in value:
-            pattern = r'\{\{\s*([^}]+)\s*\}\}'
-            matches = re.findall(pattern, value)
-
-            for match in matches:
-                try:
-                    parts = re.split(r'\.|\[|\]', match)
-                    parts = [p for p in parts if p]  # remove empty strings
-
-                    result = stored_results
-                    for part in parts:
-                        if isinstance(result, dict):
-                            if part in result:
-                                result = result[part]
-                            else:
-                                # Try common list fields inside this dict
-                                list_keys = ['messages', 'items', 'data', 'results']
-                                found = False
-                                for lk in list_keys:
-                                    if lk in result and isinstance(result[lk], list):
-                                        try:
-                                            index = int(part)
-                                            result = result[lk][index]
-                                            found = True
-                                            break
-                                        except (ValueError, IndexError):
-                                            continue
-                                if not found:
-                                    result = None
-                                    break
-                        elif isinstance(result, list):
-                            try:
-                                index = int(part)
-                                result = result[index]
-                            except (ValueError, IndexError):
-                                result = None
-                                break
-                        else:
-                            result = None
-                            break
-
-                    if result is not None:
-                        value = value.replace(f"{{{{ {match} }}}}", str(result))
-
-                except Exception as e:
-                    logger.error(f"Error resolving parameter '{match}': {str(e)}")
-
-            resolved[key] = value
-        else:
-            resolved[key] = value
-
-    return resolved
 
 
 @app.get("/workflow/{workflow_id}/status")
@@ -615,6 +570,89 @@ async def proxy_app_request(
             success=False,
             error=str(e)
         )
+
+def _resolve_parameters(parameters: Dict[str, Any], stored_results: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Resolve parameter references like {{ variable_name }} with stored results.
+    Supports nested access like {{ emails.messages[0].id }} and {{ user.name }}
+    Handles API responses with nested data structures.
+    """
+    import re
+    
+    resolved = {}
+    
+    for key, value in parameters.items():
+        if isinstance(value, str) and "{{" in value and "}}" in value:
+            pattern = r'\{\{\s*([^}]+)\s*\}\}'
+            matches = re.findall(pattern, value)
+            
+            for match in matches:
+                try:
+                    parts = re.split(r'\.|\[', match)
+                    parts = [p.rstrip(']').strip() for p in parts if p.strip()]
+                    
+                    result = stored_results
+                    
+                    for i, part in enumerate(parts):
+                        # Check if this part is an array index
+                        if part.isdigit():
+                            index = int(part)
+                            
+                            if isinstance(result, list):
+                                if index < len(result):
+                                    result = result[index]
+                                else:
+                                    logger.error(f"Index {index} out of range for list of length {len(result)}")
+                                    result = None
+                                    break
+                            elif isinstance(result, dict):
+                                list_fields = ['messages', 'data', 'items', 'results', 'emails', 'events', 'files']
+                                found = False
+                                
+                                for field in list_fields:
+                                    if field in result and isinstance(result[field], list):
+                                        if index < len(result[field]):
+                                            result = result[field][index]
+                                            found = True
+                                            logger.info(f"Accessed {field}[{index}] from dict")
+                                            break
+                                
+                                if not found:
+                                    logger.error(f"Cannot access index {index} on dict. Available keys: {list(result.keys()) if isinstance(result, dict) else 'N/A'}")
+                                    result = None
+                                    break
+                            else:
+                                logger.error(f"Cannot access index {index} on type {type(result).__name__}")
+                                result = None
+                                break
+                        else:
+                            # Property access
+                            if isinstance(result, dict):
+                                result = result.get(part)
+                                if result is None:
+                                    logger.warning(f"Property '{part}' not found in dict. Available keys: {list(result.keys()) if isinstance(result, dict) else 'N/A'}")
+                                    break
+                            else:
+                                result = getattr(result, part, None)
+                                if result is None:
+                                    logger.warning(f"Property '{part}' not found on object")
+                                    break
+                    
+                    if result is not None:
+                        replacement = str(result)
+                        value = value.replace(f"{{{{ {match} }}}}", replacement)
+                        logger.info(f"Resolved {{{{ {match} }}}} to: {replacement}")
+                    else:
+                        logger.warning(f"Could not resolve parameter reference: {match}")
+                        
+                except Exception as e:
+                    logger.error(f"Error resolving parameter '{match}': {str(e)}", exc_info=True)
+            
+            resolved[key] = value
+        else:
+            resolved[key] = value
+    
+    return resolved
 
 if __name__ == "__main__":
     import uvicorn

@@ -18,6 +18,7 @@ class GeminiService:
         else:
             genai.configure(api_key=self.api_key)
             self.model = genai.GenerativeModel('gemini-2.0-flash-exp')
+    
     async def analyze_prompt(
         self, 
         prompt: str,
@@ -53,6 +54,7 @@ Analyze the user's request and determine the best workflow solution.
 
 TASK:
 1. If the user's request matches one of the available workflow templates above, return the workflow_id
+
 IMPORTANT: Respond ONLY with valid JSON. No markdown, no explanations, just the JSON object.
 
 RESPONSE FORMAT:
@@ -153,6 +155,8 @@ IMPORTANT RULES:
 4. Use realistic parameter values based on the user's request
 5. For time-based parameters, use ISO 8601 format (e.g., "2025-01-20T10:00:00Z")
 6. ALWAYS generate at least one function call if the request is valid
+7. When fetching lists (like emails), FIRST fetch the list of IDs, THEN fetch individual items
+8. Store intermediate results with descriptive names for use in later steps
 
 RESPONSE FORMAT (JSON only, no markdown, no code blocks):
 {{
@@ -166,23 +170,36 @@ RESPONSE FORMAT (JSON only, no markdown, no code blocks):
         "query": "is:unread",
         "max_results": 10
       }},
-      "store_result_as": "unread_emails",
-      "description": "Fetch unread emails"
+      "store_result_as": "recent_emails",
+      "description": "Fetch list of recent email IDs"
     }},
     {{
       "step": 2,
-      "app": "slack",
-      "function": "post_message",
+      "app": "gmail",
+      "function": "get_message",
       "parameters": {{
-        "channel": "#notifications",
-        "text": "You have {{{{ unread_emails.length }}}} unread emails"
+        "message_id": "{{{{ recent_emails.messages[0].id }}}}"
       }},
-      "use_results_from": ["unread_emails"],
-      "description": "Send notification to Slack"
+      "store_result_as": "first_email_details",
+      "use_results_from": ["recent_emails"],
+      "description": "Get details of first email"
+    }},
+    {{
+      "step": 3,
+      "app": "calendar",
+      "function": "create_event",
+      "parameters": {{
+        "summary": "{{{{ first_email_details.subject }}}}",
+        "description": "{{{{ first_email_details.body }}}}",
+        "start_time": "2025-01-20T10:00:00Z",
+        "end_time": "2025-01-20T11:00:00Z"
+      }},
+      "use_results_from": ["first_email_details"],
+      "description": "Create calendar event from email"
     }}
   ],
-  "required_apps": ["gmail", "slack"],
-  "reasoning": "Fetch unread emails from Gmail and send count to Slack channel"
+  "required_apps": ["gmail", "calendar"],
+  "reasoning": "Fetch unread emails, get details of first email, create calendar event with email content"
 }}
 
 FIELD EXPLANATIONS:
@@ -199,11 +216,17 @@ FIELD EXPLANATIONS:
 - reasoning: Brief explanation of the overall workflow logic
 
 PARAMETER REFERENCE SYNTAX:
-Use {{{{ variable_name }}}} to reference stored results in parameters.
+Use {{{{ variable_name.field }}}} or {{{{ variable_name.array[index].field }}}} to reference stored results.
 Examples:
-- {{{{ emails[0].subject }}}} - First email's subject
+- {{{{ recent_emails.messages[0].id }}}} - First email's ID from messages array
+- {{{{ first_email_details.subject }}}} - Email subject from stored details
 - {{{{ user_data.email }}}} - User's email from stored data
-- {{{{ task_list.length }}}} - Number of items in task list
+
+IMPORTANT: When working with list operations (like emails):
+1. FIRST call list_messages to get message IDs
+2. THEN call get_message for each specific message ID you need
+3. The list_messages returns: {{success: true, messages: [{{id: "...", threadId: "..."}}, ...]}}
+4. Access message IDs with: {{{{ recent_emails.messages[0].id }}}}
 
 ===== USER REQUEST =====
 {prompt}
@@ -318,29 +341,6 @@ Analyze the above user request and generate the appropriate function calls. Resp
             "reasoning": text[:500]
         }
     
-    def _validate_function_call_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Validate and ensure response has all required fields for function call execution
-        """
-        validated = {
-            "workflow_type": response.get("workflow_type", "simple"),
-            "function_calls": response.get("function_calls", []),
-            "required_apps": response.get("required_apps", []),
-            "reasoning": response.get("reasoning", "Workflow execution plan")
-        }
-        
-        for i, call in enumerate(validated["function_calls"]):
-            if "step" not in call:
-                call["step"] = i + 1
-            if "app" not in call or "function" not in call:
-                logger.warning(f"Function call {i+1} missing required fields")
-            if "parameters" not in call:
-                call["parameters"] = {}
-            if "description" not in call:
-                call["description"] = f"Execute {call.get('function', 'unknown')} on {call.get('app', 'unknown')}"
-        
-        return validated
-    
     def _validate_workflow_response(self, response: Dict[str, Any], original_prompt: str) -> Dict[str, Any]:
         """
         Validate and ensure response has all required fields based on match_type
@@ -370,6 +370,7 @@ Analyze the above user request and generate the appropriate function calls. Resp
                 "error": response.get("error", "Unknown response format"),
                 "reasoning": response.get("reasoning", "Could not determine workflow type")
             }
+    
     def _extract_apps_from_text(self, text: str) -> List[str]:
         """Extract app names from text as fallback"""
         common_apps = [
