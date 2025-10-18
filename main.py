@@ -640,7 +640,7 @@ def _resolve_parameters(parameters: Dict[str, Any], stored_results: Dict[str, An
                     
                     if result is not None:
                         replacement = str(result)
-                        value = value.replace(f"{{{{ {match} }}}}", replacement)
+                        value = re.sub(r'\{\{\s*' + re.escape(match) + r'\s*\}\}', replacement, value)
                         logger.info(f"Resolved {{{{ {match} }}}} to: {replacement}")
                     else:
                         logger.warning(f"Could not resolve parameter reference: {match}")
