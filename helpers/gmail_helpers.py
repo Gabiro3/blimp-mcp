@@ -97,6 +97,7 @@ class GmailHelpers:
                 id=message_id,
                 format=format
             ).execute()
+
             
             return {
                 "success": True,
@@ -104,7 +105,7 @@ class GmailHelpers:
             }
             
         except HttpError as error:
-            logger.error(f"Gmail API error getting message: {message} {error}")
+            logger.error(f"Gmail API error getting message: {message_id} {error}")
             return {
                 "success": False,
                 "error": str(error)
